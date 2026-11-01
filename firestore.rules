@@ -80,6 +80,10 @@ service cloud.firestore {
       return r in ['super_admin', 'operations_manager', 'supervisor', 'delivery_rep', 'viewer'];
     }
 
+    function isValidBatch(b) {
+      return b in ['Batch 1', 'Batch 2', 'Batch 3', 'Batch 4', 'Batch 5', 'Batch 6'];
+    }
+
     function isBoundedStringArray(arr, maxLen) {
       return arr is list && arr.size() <= maxLen && (arr.size() == 0 || (arr[0] is string && arr[0].size() <= 64));
     }
@@ -363,6 +367,68 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidRepLiveTelemetry(data) {
+      return data.keys().hasAll([
+          'employeeId', 'teamId', 'userId', 'batch', 'walletBalance',
+          'hasGpsFix', 'lat', 'lng', 'accuracy', 'isOnline',
+          'gpsUpdatedAtMs', 'updatedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'employeeId', 'teamId', 'userId', 'batch', 'walletBalance',
+          'hasGpsFix', 'lat', 'lng', 'accuracy', 'isOnline',
+          'gpsUpdatedAtMs', 'updatedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.employeeId) &&
+        isValidOptionalId(data.teamId) &&
+        isValidOptionalId(data.userId) &&
+        isValidBatch(data.batch) &&
+        data.walletBalance is number && data.walletBalance >= 0 && data.walletBalance <= 10000000 &&
+        data.hasGpsFix is bool &&
+        data.lat is number && data.lat >= -90 && data.lat <= 90 &&
+        data.lng is number && data.lng >= -180 && data.lng <= 180 &&
+        data.accuracy is number && data.accuracy >= 0 && data.accuracy <= 50000 &&
+        data.isOnline is bool &&
+        data.gpsUpdatedAtMs is number && data.gpsUpdatedAtMs >= 0 &&
+        isValidId(data.updatedBy) &&
+        data.updatedBy == request.auth.uid &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidRepSmartAlertLog(data) {
+      return data.keys().hasAll([
+          'alertId', 'employeeId', 'employeeCode', 'employeeName', 'teamId',
+          'severity', 'alertType', 'reason', 'batch', 'walletBalance',
+          'performanceRate', 'status', 'resolvedReason', 'triggeredAtMs',
+          'resolvedAtMs', 'recordedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'alertId', 'employeeId', 'employeeCode', 'employeeName', 'teamId',
+          'severity', 'alertType', 'reason', 'batch', 'walletBalance',
+          'performanceRate', 'status', 'resolvedReason', 'triggeredAtMs',
+          'resolvedAtMs', 'recordedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.alertId) &&
+        isValidId(data.employeeId) &&
+        data.employeeCode is string && data.employeeCode.size() >= 1 && data.employeeCode.size() <= 64 &&
+        data.employeeName is string && data.employeeName.size() >= 1 && data.employeeName.size() <= 120 &&
+        isValidOptionalId(data.teamId) &&
+        data.severity in ['red', 'orange'] &&
+        data.alertType in ['performance_red', 'wallet_batch_456', 'wallet_batch_123'] &&
+        data.reason is string && data.reason.size() >= 2 && data.reason.size() <= 300 &&
+        isValidBatch(data.batch) &&
+        data.walletBalance is number && data.walletBalance >= 0 && data.walletBalance <= 10000000 &&
+        data.performanceRate is number && data.performanceRate >= -1 && data.performanceRate <= 100 &&
+        data.status in ['active', 'resolved'] &&
+        data.resolvedReason is string && data.resolvedReason.size() <= 200 &&
+        data.triggeredAtMs is number && data.triggeredAtMs >= 0 &&
+        data.resolvedAtMs is number && data.resolvedAtMs >= 0 &&
+        isValidId(data.recordedBy) &&
+        data.recordedBy == request.auth.uid &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     // Helper verifying that an invited user claims ONLY the exact role, scope, and active status pre-provisioned by Super Admin
     function matchesPreprovisionedInvitation(data) {
       return exists(invitationDocPath(data.emailKey)) &&
@@ -394,11 +460,6 @@ service cloud.firestore {
         isOperationsManager()
       );
 
-      // Controlled Registration:
-      // 1) Bootstrapped Super Admin claiming own account, OR
-      // 2) Pre-provisioned account claiming exact pre-assigned role & scope, OR
-      // 3) Verified user auto-registering WITHOUT invitation when Super Admin enables autoProvisionWithoutInvite (strictly bounded to non-admin default role), OR
-      // 4) Active Super Admin creating a user record directly
       allow create: if isVerifiedUser() &&
         isValidId(userId) &&
         isValidUserAccount(incoming()) &&
@@ -836,6 +897,179 @@ service cloud.firestore {
         ]);
 
       allow delete: if false;
+    }
+
+    // ---------------------------------------------------------
+    // Collection 9: /repLiveLocations/{employeeId}
+    // Real-time GPS, Wallet Balance, and Batch Telemetry
+    // ---------------------------------------------------------
+    match /repLiveLocations/{employeeId} {
+      allow get: if isSignedIn() && isValidId(employeeId) && (
+        isSuperAdmin() ||
+        isOperationsManager() ||
+        isViewer() ||
+        (isSupervisor() && (
+          (resource != null && existing().teamId == currentUserData().teamId) ||
+          (resource == null &&
+            exists(/databases/$(database)/documents/employees/$(employeeId)) &&
+            get(/databases/$(database)/documents/employees/$(employeeId)).data.teamId == currentUserData().teamId)
+        )) ||
+        (isDeliveryRep() && (
+          employeeId == currentUserData().employeeId ||
+          (resource != null && existing().userId == request.auth.uid)
+        ))
+      );
+
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        isOperationsManager() ||
+        isViewer() ||
+        (isSupervisor() && existing().teamId == currentUserData().teamId) ||
+        (isDeliveryRep() && (existing().employeeId == currentUserData().employeeId || existing().userId == request.auth.uid))
+      );
+
+      allow create: if isVerifiedUser() &&
+        isValidId(employeeId) &&
+        isValidRepLiveTelemetry(incoming()) &&
+        incoming().employeeId == employeeId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/employees/$(employeeId)) && (
+          isSuperAdmin() ||
+          (isNonAdminWriteUnlocked() && (
+            isOperationsManager() ||
+            (isSupervisor() && incoming().teamId == currentUserData().teamId) ||
+            (
+              isDeliveryRep() &&
+              employeeId == currentUserData().employeeId &&
+              incoming().teamId == get(/databases/$(database)/documents/employees/$(employeeId)).data.teamId &&
+              incoming().userId == request.auth.uid &&
+              incoming().walletBalance == 0
+            )
+          ))
+        );
+
+      allow update: if isVerifiedUser() &&
+        isValidId(employeeId) &&
+        isValidRepLiveTelemetry(incoming()) &&
+        incoming().employeeId == existing().employeeId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1 (Tier 1): Super Admin & Operations Manager updating wallet, batch, team scope, or GPS
+          (
+            (isSuperAdmin() || (isOperationsManager() && isNonAdminWriteUnlocked())) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'teamId', 'userId', 'batch', 'walletBalance',
+              'hasGpsFix', 'lat', 'lng', 'accuracy', 'isOnline',
+              'gpsUpdatedAtMs', 'updatedBy', 'updatedAt'
+            ])
+          ) ||
+          // Action 2 (Tier 2): Supervisor updating wallet, batch, or GPS for own team member
+          (
+            isSupervisor() &&
+            isNonAdminWriteUnlocked() &&
+            existing().teamId == currentUserData().teamId &&
+            incoming().teamId == existing().teamId &&
+            incoming().userId == existing().userId &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'batch', 'walletBalance', 'hasGpsFix', 'lat', 'lng',
+              'accuracy', 'isOnline', 'gpsUpdatedAtMs', 'updatedBy', 'updatedAt'
+            ])
+          ) ||
+          // Action 3 (Tier 3): Delivery Rep broadcasting own live GPS & online state ONLY (wallet & batch immutable)
+          (
+            isDeliveryRep() &&
+            isNonAdminWriteUnlocked() &&
+            employeeId == currentUserData().employeeId &&
+            incoming().teamId == existing().teamId &&
+            incoming().batch == existing().batch &&
+            incoming().walletBalance == existing().walletBalance &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'hasGpsFix', 'lat', 'lng', 'accuracy', 'isOnline',
+              'gpsUpdatedAtMs', 'updatedBy', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isVerifiedUser() &&
+        isValidId(employeeId) &&
+        (isSuperAdmin() || (isOperationsManager() && isNonAdminWriteUnlocked()));
+    }
+
+    // ---------------------------------------------------------
+    // Collection 10: /repAlertLogs/{alertId}
+    // Historical Smart Alert Episodes (Terminal State Locked)
+    // ---------------------------------------------------------
+    match /repAlertLogs/{alertId} {
+      allow get: if isSignedIn() && isValidId(alertId) && (
+        isSuperAdmin() ||
+        isOperationsManager() ||
+        isViewer() ||
+        (isSupervisor() && (resource == null || existing().teamId == currentUserData().teamId)) ||
+        (isDeliveryRep() && resource != null && existing().employeeId == currentUserData().employeeId)
+      );
+
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        isOperationsManager() ||
+        isViewer() ||
+        (isSupervisor() && existing().teamId == currentUserData().teamId) ||
+        (isDeliveryRep() && existing().employeeId == currentUserData().employeeId)
+      );
+
+      allow create: if isVerifiedUser() &&
+        isValidId(alertId) &&
+        isValidRepSmartAlertLog(incoming()) &&
+        incoming().alertId == alertId &&
+        incoming().status == 'active' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/employees/$(incoming().employeeId)) && (
+          isSuperAdmin() ||
+          (isNonAdminWriteUnlocked() && (
+            isOperationsManager() ||
+            (isSupervisor() && incoming().teamId == currentUserData().teamId)
+          ))
+        );
+
+      allow update: if isVerifiedUser() &&
+        isValidId(alertId) &&
+        isValidRepSmartAlertLog(incoming()) &&
+        incoming().alertId == existing().alertId &&
+        incoming().employeeId == existing().employeeId &&
+        incoming().alertType == existing().alertType &&
+        incoming().severity == existing().severity &&
+        incoming().triggeredAtMs == existing().triggeredAtMs &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (existing().status == 'active' || isSuperAdmin()) && (
+          isSuperAdmin() ||
+          (
+            isNonAdminWriteUnlocked() &&
+            (isOperationsManager() || (isSupervisor() && existing().teamId == currentUserData().teamId && incoming().teamId == existing().teamId)) &&
+            (
+              // Action 1: Resolving an active alert episode
+              (
+                incoming().status == 'resolved' &&
+                incoming().resolvedAtMs > 0 &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'status', 'resolvedReason', 'resolvedAtMs', 'walletBalance',
+                  'performanceRate', 'recordedBy', 'updatedAt'
+                ])
+              ) ||
+              // Action 2: Refreshing active episode metrics while still active
+              (
+                incoming().status == 'active' &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'reason', 'batch', 'walletBalance', 'performanceRate',
+                  'recordedBy', 'updatedAt'
+                ])
+              )
+            )
+          )
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(alertId) && isSuperAdmin();
     }
   }
 }

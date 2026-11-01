@@ -1,5 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AdvancedMarker,
+  Map as GoogleMapView,
+  useMap,
+  useMapsLibrary,
+} from '@vis.gl/react-google-maps';
+import {
   BarChart3,
   TrendingUp,
   MapPin,
@@ -20,12 +26,24 @@ import {
   Layers,
   CheckCircle2,
   XCircle,
+  FlaskConical,
+  LocateFixed,
+  Maximize2,
+  Pause,
+  Play,
+  Radio,
+  RotateCcw,
+  Volume2,
+  VolumeX,
+  Wallet,
+  CloudUpload,
 } from 'lucide-react';
 import {
   AppRoutePage,
   AttendanceRecord,
   Employee,
   EmployeeSummary,
+  MonitoredRepresentative,
   MonthDay,
   SecurityPolicySettings,
   Team,
@@ -41,6 +59,16 @@ import {
   getDaysInMonth,
 } from '../utils/shiftCalculations';
 import { canAccessRoute } from '../utils/rbac';
+import {
+  LiveAlertFilterMode,
+  filterMonitoredRepresentatives,
+  formatGpsAgeAr,
+  sortMonitoredRepresentatives,
+} from '../utils/liveMonitoringEngine';
+import {
+  LiveSimulationController,
+  SimulationScenarioId,
+} from '../utils/liveSimulationEngine';
 
 interface ExecutiveOverviewDashboardProps {
   currentUser: UserProfile;
@@ -58,6 +86,15 @@ interface ExecutiveOverviewDashboardProps {
   todayStr: string;
   canCreateEmp: boolean;
   isMigratingLocal: boolean;
+  monitoredReps: MonitoredRepresentative[];
+  nowMs: number;
+  soundEnabled: boolean;
+  onToggleSound: () => void;
+  simulation: LiveSimulationController;
+  onNotify: (
+    message: string,
+    type?: 'success' | 'info' | 'warning' | 'error'
+  ) => void;
   onChangeMonth: (year: number, month: number) => void;
   onNavigateSnapshot: (
     next: Partial<NavigationSnapshot> & { route: AppRoutePage }
@@ -168,6 +205,57 @@ const CircularGaugeRing: React.FC<{
   );
 };
 
+const OVERVIEW_DEFAULT_CENTER = { lat: 30.0444, lng: 31.2357 };
+
+const OverviewMapViewportController: React.FC<{
+  selectedRep: MonitoredRepresentative | null;
+  repsWithGps: MonitoredRepresentative[];
+  fitTrigger: number;
+}> = ({ selectedRep, repsWithGps, fitTrigger }) => {
+  const map = useMap('overview-live-map');
+  const coreLib = useMapsLibrary('core');
+
+  useEffect(() => {
+    if (!map || !selectedRep || !selectedRep.telemetry.hasGpsFix) return;
+    map.panTo({
+      lat: selectedRep.telemetry.lat,
+      lng: selectedRep.telemetry.lng,
+    });
+    const zoom = map.getZoom() ?? 11;
+    if (zoom < 14) {
+      map.setZoom(14);
+    }
+  }, [
+    map,
+    selectedRep?.employee.id,
+    selectedRep?.telemetry.hasGpsFix,
+    selectedRep?.telemetry.lat,
+    selectedRep?.telemetry.lng,
+  ]);
+
+  useEffect(() => {
+    if (!map || repsWithGps.length === 0) return;
+    if (repsWithGps.length === 1) {
+      map.panTo({
+        lat: repsWithGps[0].telemetry.lat,
+        lng: repsWithGps[0].telemetry.lng,
+      });
+      map.setZoom(13);
+      return;
+    }
+    if (coreLib?.LatLngBounds) {
+      const bounds = new coreLib.LatLngBounds();
+      repsWithGps.forEach((item) => {
+        bounds.extend({ lat: item.telemetry.lat, lng: item.telemetry.lng });
+      });
+      map.fitBounds(bounds, 36);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map, coreLib, fitTrigger, repsWithGps.length]);
+
+  return null;
+};
+
 export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProps> = ({
   currentUser,
   securityPolicy,
@@ -183,6 +271,11 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
   todayStr,
   canCreateEmp,
   isMigratingLocal,
+  monitoredReps,
+  nowMs,
+  soundEnabled,
+  onToggleSound,
+  simulation,
   onChangeMonth,
   onNavigateSnapshot,
   onOpenMonthlyGridWithFilter,
@@ -195,6 +288,14 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
   const [selectedDateStr, setSelectedDateStr] = useState<string | null>(null);
   const [isDayPickerOpen, setIsDayPickerOpen] = useState(false);
   const dayNavigatorRef = useRef<HTMLDivElement>(null);
+
+  // حالات الخريطة الحية وملخص التفاصيل ومحاكاة اختبار السيستم داخل البطاقة المحددة
+  const [overviewMapTab, setOverviewMapTab] = useState<'live_reps' | 'teams'>('live_reps');
+  const [overviewAlertFilter, setOverviewAlertFilter] =
+    useState<LiveAlertFilterMode>('all');
+  const [selectedMapRepId, setSelectedMapRepId] = useState<string | null>(null);
+  const [isSimPanelOpen, setIsSimPanelOpen] = useState<boolean>(false);
+  const [overviewFitTrigger, setOverviewFitTrigger] = useState<number>(1);
 
   // إغلاق نافذة التفاصيل المبسطة أو قائمة الأيام بزر Escape أو النقر خارجها
   useEffect(() => {
@@ -1257,40 +1358,148 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
     },
   ];
 
-  // المضلعات الخمسة لخريطة القطاعات التفاعلية (تحاكي الخريطة البنفسجية في الصورة المرجعية)
-  const regionMapPolygons = [
-    {
-      index: 0,
-      d: 'M 75 18 L 132 14 L 146 48 L 106 64 L 68 46 Z',
-      fill: '#1E293B',
-      activeFill: '#4C1D95',
-    },
-    {
-      index: 1,
-      d: 'M 132 14 L 185 32 L 214 78 L 165 92 L 146 48 Z',
-      fill: '#A78BFA',
-      activeFill: '#8B5CF6',
-    },
-    {
-      index: 2,
-      d: 'M 106 64 L 146 48 L 165 92 L 136 124 L 92 102 Z',
-      fill: '#7C3AED',
-      activeFill: '#6D28D9',
-    },
-    {
-      index: 3,
-      d: 'M 68 46 L 106 64 L 92 102 L 58 84 Z',
-      fill: '#475569',
-      activeFill: '#5B21B6',
-    },
-    {
-      index: 4,
-      d: 'M 92 102 L 136 124 L 198 112 L 214 78 L 165 92 L 128 144 L 88 128 Z',
-      fill: '#DDD6FE',
-      activeFill: '#C4B5FD',
-    },
-  ];
+  // بيانات الخريطة المباشرة للمناديب وترتيب الأولوية وملخص التفاصيل الفوري داخل البطاقة
+  const sortedLiveReps = useMemo(
+    () => sortMonitoredRepresentatives(monitoredReps),
+    [monitoredReps]
+  );
 
+  const filteredLiveReps = useMemo(
+    () =>
+      filterMonitoredRepresentatives(sortedLiveReps, {
+        alertFilter: overviewAlertFilter,
+        batchFilter: 'all',
+        searchQuery: '',
+      }),
+    [sortedLiveReps, overviewAlertFilter]
+  );
+
+  const overviewRepsWithGps = useMemo(
+    () =>
+      filteredLiveReps.filter(
+        (r) =>
+          r.telemetry.hasGpsFix &&
+          Number.isFinite(r.telemetry.lat) &&
+          Number.isFinite(r.telemetry.lng)
+      ),
+    [filteredLiveReps]
+  );
+
+  const selectedMapRep = useMemo(
+    () =>
+      sortedLiveReps.find((r) => r.employee.id === selectedMapRepId) || null,
+    [sortedLiveReps, selectedMapRepId]
+  );
+
+  const liveCardStats = useMemo(() => {
+    let red = 0;
+    let orange = 0;
+    let normal = 0;
+    let onlineGps = 0;
+    let offline = 0;
+
+    sortedLiveReps.forEach((item) => {
+      if (item.primarySeverity === 'red') red++;
+      if (item.alerts.some((a) => a.severity === 'orange')) orange++;
+      if (item.alerts.length === 0) normal++;
+      if (item.connectionState === 'online' && item.telemetry.hasGpsFix) {
+        onlineGps++;
+      } else {
+        offline++;
+      }
+    });
+
+    return {
+      total: sortedLiveReps.length,
+      red,
+      orange,
+      normal,
+      onlineGps,
+      offline,
+    };
+  }, [sortedLiveReps]);
+
+  const handleRunSimScenario = (scenario: SimulationScenarioId) => {
+    setIsSimPanelOpen(true);
+    setOverviewMapTab('live_reps');
+    simulation.startOrApplyScenario(scenario);
+    if (
+      scenario === 'trigger_red_alert' ||
+      scenario === 'trigger_combined_red_orange'
+    ) {
+      setOverviewAlertFilter('all');
+    }
+    setOverviewFitTrigger((n) => n + 1);
+  };
+
+  const openLiveRepDrillDown = (rep: MonitoredRepresentative) => {
+    const canGoFullMap = canAccessRoute(
+      currentUser,
+      'live_monitoring',
+      securityPolicy
+    );
+    const alertSummary =
+      rep.alerts.length > 0
+        ? rep.alerts.map((a) => a.reason).join(' · ')
+        : 'وضع تشغيلي سليم بدون تنبيهات';
+
+    setDrillDown({
+      id: `live_rep_${rep.employee.id}`,
+      titleAr: `بطاقة المندوب الحية: ${rep.employee.fullName}`,
+      subtitleAr: `الكود: ${rep.employee.employeeCode} · ${rep.telemetry.batch} · ${rep.statusLabelAr}`,
+      headlineValue: `${rep.telemetry.walletBalance.toLocaleString('ar-EG')}`,
+      headlineUnit: 'ج.م بالمحفظة',
+      deltaText: alertSummary,
+      deltaPositive: rep.alerts.length === 0,
+      summaryPoints: [
+        {
+          label: 'نسبة الأداء المعتمدة',
+          value:
+            rep.summary.performanceRate !== null
+              ? `${rep.summary.performanceRate}%`
+              : '—',
+          tone: rep.primarySeverity === 'red' ? 'rose' : 'emerald',
+        },
+        {
+          label: 'أيام العمل / الغياب',
+          value: `${rep.summary.workedDays} عمل · ${rep.summary.absentDays} غياب`,
+          tone: rep.summary.absentDays > 0 ? 'rose' : 'emerald',
+        },
+        {
+          label: 'إجمالي ساعات الشهر',
+          value: `${rep.summary.totalHours} ساعة`,
+          tone: 'violet',
+        },
+        {
+          label: 'تحديث إشارة GPS',
+          value: formatGpsAgeAr(rep.gpsAgeMs, rep.telemetry.gpsUpdatedAtMs),
+          tone: rep.connectionState === 'online' ? 'emerald' : 'amber',
+        },
+      ],
+      primaryActionLabel: canGoFullMap
+        ? 'فتح لوحة المراقبة الحية الكاملة'
+        : 'فتح الجدول الشهري للمندوب',
+      onPrimaryAction: () => {
+        setDrillDown(null);
+        if (canGoFullMap) {
+          onNavigateSnapshot({ route: 'live_monitoring' });
+        } else if (!simulation.usesSyntheticFleet) {
+          onOpenMonthlyGridWithFilter({ search: rep.employee.employeeCode });
+        }
+      },
+      secondaryActionLabel: !simulation.usesSyntheticFleet
+        ? 'استعراض المندوب في الجدول الشهري'
+        : undefined,
+      onSecondaryAction: !simulation.usesSyntheticFleet
+        ? () => {
+            setDrillDown(null);
+            onOpenMonthlyGridWithFilter({ search: rep.employee.employeeCode });
+          }
+        : undefined,
+    });
+  };
+
+  const mapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
   const maxBucketHours = Math.max(...eightBuckets.map((b) => b.hours), 10);
 
   return (
@@ -2127,116 +2336,825 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
           {/* العمود الثالث (4 أعمدة): خريطة وجدول الفرق + دونات القوى العاملة    */}
           {/* ------------------------------------------------------------------- */}
           <div className="xl:col-span-4 flex flex-col gap-4">
-            {/* البطاقة العلوية: الأداء حسب الفرق والقطاعات + الخريطة التفاعلية */}
-            <div className="flex-[1.3] bg-white dark:bg-[#0E1528] border border-slate-200 dark:border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between gap-4">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-violet-600 text-white flex items-center justify-center shrink-0">
-                    <MapPin className="w-4 h-4" />
+            {/* البطاقة العلوية: الخريطة التفاعلية الحية + ملخص التفاصيل الفوري + محاكاة اختبار السيستم */}
+            <div className="flex-[1.3] bg-white dark:bg-[#0E1528] border border-slate-200 dark:border-slate-800/90 rounded-2xl p-4 sm:p-5 flex flex-col justify-between gap-3.5">
+              {/* 1. رأس البطاقة: العنوان + حالة البث/المحاكاة + أزرار الصوت والمحاكاة والتوسيع */}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div
+                    className={`w-9 h-9 rounded-xl text-white flex items-center justify-center shrink-0 ${
+                      simulation.isActive
+                        ? 'bg-amber-600'
+                        : liveCardStats.red > 0
+                        ? 'bg-rose-600'
+                        : 'bg-violet-600'
+                    }`}
+                  >
+                    <Radio className="w-4 h-4" />
                   </div>
-                  <div>
-                    <h2 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
-                      أداء الفرق والقطاعات التشغيلية
-                    </h2>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                      اضغط على أي قطاع بالخريطة أو صف بالجدول للتفاصيل
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <h2 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white truncate">
+                        الخريطة الحية وملخص التفاصيل
+                      </h2>
+                      <span
+                        className={`text-[10px] font-extrabold px-1.5 py-0.5 rounded font-mono tabular-nums ${
+                          simulation.isActive
+                            ? 'bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/40'
+                            : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
+                        }`}
+                      >
+                        {simulation.isActive ? 'وضع محاكاة نشط' : 'بث مباشر'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                      مواقع المناديب، المحافظ، التنبيهات الذكية، وملخص الفرق في مكان واحد
                     </p>
                   </div>
                 </div>
+
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={onToggleSound}
+                    className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+                      soundEnabled
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-slate-100 dark:bg-[#131C34] border-slate-300 dark:border-slate-700 text-slate-500'
+                    }`}
+                    title={
+                      soundEnabled
+                        ? 'التنبيه الصوتي مفعل (انقر للكتم)'
+                        : 'التنبيه الصوتي مكتوم (انقر للتفعيل)'
+                    }
+                  >
+                    {soundEnabled ? (
+                      <Volume2 className="w-3.5 h-3.5" />
+                    ) : (
+                      <VolumeX className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsSimPanelOpen((prev) => !prev)}
+                    className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-extrabold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
+                      simulation.isActive || isSimPanelOpen
+                        ? 'bg-amber-600 hover:bg-amber-500 border-amber-500 text-white'
+                        : 'bg-slate-100 dark:bg-[#131C34] hover:bg-violet-600 hover:text-white border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200'
+                    }`}
+                    title="فتح أو إغلاق لوحة محاكاة واختبار السيستم"
+                  >
+                    <FlaskConical className="w-3.5 h-3.5" />
+                    <span>محاكاة السستم</span>
+                  </button>
+
+                  {canAccessRoute(currentUser, 'live_monitoring', securityPolicy) && (
+                    <button
+                      type="button"
+                      onClick={() => onNavigateSnapshot({ route: 'live_monitoring' })}
+                      className="px-2 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-extrabold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
+                      title="فتح شاشة المراقبة الحية الكاملة"
+                    >
+                      <Maximize2 className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">توسيع</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
-              {/* الخريطة التفاعلية المضلعة بنفس تدرجات البنفسجي والكحلي في الصورة */}
-              <div className="relative flex items-center justify-center py-1">
-                <svg viewBox="45 8 180 142" className="w-full max-w-[260px] h-36">
-                  {regionMapPolygons.map((poly) => {
-                    const matchedTeam = teamRegions[poly.index % Math.max(teamRegions.length, 1)];
-                    return (
-                      <path
-                        key={poly.index}
-                        d={poly.d}
-                        fill={poly.fill}
-                        stroke="#0B1020"
-                        strokeWidth="1.5"
-                        onClick={() => {
-                          if (matchedTeam) openTeamDrillDown(matchedTeam);
-                        }}
-                        className="cursor-pointer hover:opacity-85 transition-opacity"
+              {/* 2. لوحة محاكاة واختبار السيستم التفاعلية (تعمل بضغطة واحدة دون المساس بسجلات الحضور الفعلية) */}
+              {(isSimPanelOpen || simulation.isActive) && (
+                <div className="rounded-xl border border-amber-300/80 dark:border-amber-700/60 bg-amber-50/70 dark:bg-[#161D33] p-3 space-y-2.5 text-[11px]">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 font-extrabold text-amber-900 dark:text-amber-300">
+                      <FlaskConical className="w-3.5 h-3.5 shrink-0" />
+                      <span>معمل محاكاة واختبار السيستم الفوري</span>
+                      {simulation.isActive && (
+                        <span className="font-mono tabular-nums text-[10px] opacity-85">
+                          (تحديث #{simulation.stepCount})
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1">
+                      {!simulation.isActive ? (
+                        <button
+                          type="button"
+                          onClick={() => handleRunSimScenario('balanced_fleet')}
+                          className="px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold flex items-center gap-1 cursor-pointer"
+                        >
+                          <Play className="w-3 h-3" />
+                          <span>بدء المحاكاة</span>
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={simulation.toggleAutoMove}
+                            className={`px-2 py-1 rounded-md font-bold flex items-center gap-1 border cursor-pointer ${
+                              simulation.isAutoMoving
+                                ? 'bg-emerald-600 text-white border-emerald-500'
+                                : 'bg-slate-800 text-slate-200 border-slate-700'
+                            }`}
+                            title="تفعيل أو إيقاف تحريك مواقع GPS التلقائي كل 2.8 ثانية"
+                          >
+                            {simulation.isAutoMoving ? (
+                              <>
+                                <Pause className="w-3 h-3" />
+                                <span>حركة GPS: نشطة</span>
+                              </>
+                            ) : (
+                              <>
+                                <Play className="w-3 h-3" />
+                                <span>حركة GPS: متوقفة</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={simulation.stepOnce}
+                            className="px-2 py-1 rounded-md bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 font-bold cursor-pointer"
+                            title="تحريك المواقع خطوة واحدة يدوياً"
+                          >
+                            خطوة +1
+                          </button>
+
+                          {simulation.canSyncCloud && (
+                            <button
+                              type="button"
+                              disabled={simulation.isSyncingCloud}
+                              onClick={() => void simulation.syncSimulationToCloud()}
+                              className="px-2 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white font-bold flex items-center gap-1 disabled:opacity-50 cursor-pointer"
+                              title="مزامنة المواقع والمحافظ الحالية للمناديب الفعليين إلى Cloud Firestore"
+                            >
+                              <CloudUpload className="w-3 h-3" />
+                              <span>
+                                {simulation.isSyncingCloud ? 'جارٍ الحفظ...' : 'حفظ بالسحابة'}
+                              </span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={simulation.stopSimulation}
+                            className="px-2 py-1 rounded-md bg-rose-600 hover:bg-rose-500 text-white font-extrabold flex items-center gap-1 cursor-pointer"
+                            title="إنهاء المحاكاة والعودة الفورية لبيانات قاعدة البيانات الحقيقية"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            <span>إيقاف</span>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* أزرار اختبار جميع سيناريوهات التنبيهات الذكية وحالات GPS */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleRunSimScenario('trigger_red_alert')}
+                      className={`px-2 py-1.5 rounded-lg border text-right font-bold transition-colors cursor-pointer ${
+                        simulation.activeScenario === 'trigger_red_alert'
+                          ? 'bg-rose-600 text-white border-rose-500'
+                          : 'bg-white dark:bg-[#0E1528] hover:border-rose-500 border-slate-200 dark:border-slate-700 text-rose-700 dark:text-rose-300'
+                      }`}
+                    >
+                      🔴 تنبيه أحمر (أداء)
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRunSimScenario('trigger_orange_456')}
+                      className={`px-2 py-1.5 rounded-lg border text-right font-bold transition-colors cursor-pointer ${
+                        simulation.activeScenario === 'trigger_orange_456'
+                          ? 'bg-amber-600 text-white border-amber-500'
+                          : 'bg-white dark:bg-[#0E1528] hover:border-amber-500 border-slate-200 dark:border-slate-700 text-amber-700 dark:text-amber-300'
+                      }`}
+                    >
+                      🟠 Batch 4-6 (&gt;2000)
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRunSimScenario('trigger_orange_123')}
+                      className={`px-2 py-1.5 rounded-lg border text-right font-bold transition-colors cursor-pointer ${
+                        simulation.activeScenario === 'trigger_orange_123'
+                          ? 'bg-amber-600 text-white border-amber-500'
+                          : 'bg-white dark:bg-[#0E1528] hover:border-amber-500 border-slate-200 dark:border-slate-700 text-amber-700 dark:text-amber-300'
+                      }`}
+                    >
+                      🟠 Batch 1-3 (&gt;2500)
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleRunSimScenario('trigger_combined_red_orange')
+                      }
+                      className={`px-2 py-1.5 rounded-lg border text-right font-bold transition-colors cursor-pointer ${
+                        simulation.activeScenario === 'trigger_combined_red_orange'
+                          ? 'bg-rose-700 text-white border-rose-500'
+                          : 'bg-white dark:bg-[#0E1528] hover:border-rose-500 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200'
+                      }`}
+                    >
+                      🔴+🟠 أحمر وبرتقالي معاً
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRunSimScenario('trigger_gps_disconnect')}
+                      className={`px-2 py-1.5 rounded-lg border text-right font-bold transition-colors cursor-pointer ${
+                        simulation.activeScenario === 'trigger_gps_disconnect'
+                          ? 'bg-slate-700 text-white border-slate-500'
+                          : 'bg-white dark:bg-[#0E1528] hover:border-slate-400 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      📡 انقطاع GPS (Offline)
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRunSimScenario('resolve_all_alerts')}
+                      className={`px-2 py-1.5 rounded-lg border text-right font-bold transition-colors cursor-pointer ${
+                        simulation.activeScenario === 'resolve_all_alerts'
+                          ? 'bg-emerald-600 text-white border-emerald-500'
+                          : 'bg-white dark:bg-[#0E1528] hover:border-emerald-500 border-slate-200 dark:border-slate-700 text-emerald-700 dark:text-emerald-300'
+                      }`}
+                    >
+                      ✅ معالجة وإغلاق الكل
+                    </button>
+                  </div>
+
+                  <p className="text-[10px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                    تختبر هذه المحاكاة حركة GPS، أولوية الترتيب، الصوت الفوري، وإغلاق التنبيهات تلقائياً في الذاكرة دون تغيير أي سجل حضور فعلي بالنظام.
+                  </p>
+                </div>
+              )}
+
+              {/* 3. الخريطة التفاعلية الحية المباشرة (Google Maps Live View) */}
+              <div className="relative w-full h-60 sm:h-64 rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-[#090E1A]">
+                {!mapsApiKey ? (
+                  <div className="w-full h-full flex flex-col items-center justify-center p-4 text-center space-y-1.5">
+                    <MapPin className="w-6 h-6 text-slate-400" />
+                    <p className="text-xs font-extrabold text-slate-800 dark:text-slate-200">
+                      مفتاح خرائط Google غير مهيأ حالياً
+                    </p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      جميع تفاصيل المناديب والتنبيهات متاحة أدناه ويمكنك تشغيل المحاكاة لاختبار التنبيهات.
+                    </p>
+                  </div>
+                ) : (
+                  <GoogleMapView
+                    id="overview-live-map"
+                    mapId="DEMO_MAP_ID"
+                    defaultCenter={OVERVIEW_DEFAULT_CENTER}
+                    defaultZoom={11}
+                    gestureHandling="greedy"
+                    disableDefaultUI={true}
+                    zoomControl={true}
+                    internalUsageAttributionIds={[
+                      'gmp_mcp_codeassist_v1_aistudio',
+                    ]}
+                    className="w-full h-full"
+                  >
+                    <OverviewMapViewportController
+                      selectedRep={selectedMapRep}
+                      repsWithGps={overviewRepsWithGps}
+                      fitTrigger={overviewFitTrigger}
+                    />
+
+                    {overviewRepsWithGps.map((item) => {
+                      const isSelected =
+                        selectedMapRep?.employee.id === item.employee.id;
+                      const pinColor =
+                        item.markerTone === 'red'
+                          ? 'bg-rose-600 border-rose-800 text-white'
+                          : item.markerTone === 'orange'
+                          ? 'bg-amber-500 border-amber-700 text-slate-950'
+                          : item.markerTone === 'green'
+                          ? 'bg-emerald-600 border-emerald-800 text-white'
+                          : 'bg-slate-600 border-slate-800 text-white';
+
+                      const zIdx = isSelected
+                        ? 900
+                        : item.primarySeverity === 'red'
+                        ? 500
+                        : item.primarySeverity === 'orange'
+                        ? 300
+                        : 100;
+
+                      return (
+                        <AdvancedMarker
+                          key={item.employee.id}
+                          position={{
+                            lat: item.telemetry.lat,
+                            lng: item.telemetry.lng,
+                          }}
+                          zIndex={zIdx}
+                          onClick={() => {
+                            setSelectedMapRepId(item.employee.id);
+                            setOverviewMapTab('live_reps');
+                          }}
+                        >
+                          <div
+                            dir="rtl"
+                            className={`cursor-pointer select-none transition-transform ${
+                              isSelected ? 'scale-110' : 'hover:scale-105'
+                            }`}
+                          >
+                            <div
+                              className={`rounded-lg shadow-md border px-2 py-1 min-w-[112px] max-w-[165px] ${pinColor} ${
+                                isSelected ? 'ring-2 ring-white' : ''
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-1 text-[10px] font-extrabold leading-tight">
+                                <span className="truncate">
+                                  {item.employee.fullName}
+                                </span>
+                                <span
+                                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                    item.connectionState === 'online'
+                                      ? 'bg-white'
+                                      : 'bg-slate-300 opacity-60'
+                                  }`}
+                                />
+                              </div>
+                              <div className="flex items-center justify-between gap-1 mt-0.5 text-[9px] font-mono tabular-nums font-bold opacity-95">
+                                <span>{item.telemetry.batch}</span>
+                                <span>
+                                  {item.telemetry.walletBalance.toLocaleString(
+                                    'ar-EG'
+                                  )}{' '}
+                                  ج
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </AdvancedMarker>
+                      );
+                    })}
+                  </GoogleMapView>
+                )}
+
+                {/* شريط عائم أعلى الخريطة لمفتاح الألوان وزر احتواء المواقع */}
+                {mapsApiKey && (
+                  <div className="absolute top-2 right-2 left-2 flex items-center justify-between gap-1.5 pointer-events-none">
+                    <div className="bg-slate-900/85 text-white px-2 py-1 rounded-lg border border-slate-700/80 flex items-center gap-2 text-[10px] font-bold pointer-events-auto">
+                      <span className="inline-flex items-center gap-1">
+                        <span className="w-2 h-2 rounded-full bg-rose-500" />
+                        أحمر
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <span className="w-2 h-2 rounded-full bg-amber-400" />
+                        برتقالي
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                        سليم
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <span className="w-2 h-2 rounded-full bg-slate-400" />
+                        Offline
+                      </span>
+                    </div>
+
+                    {overviewRepsWithGps.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setOverviewFitTrigger((n) => n + 1)}
+                        className="bg-slate-900/85 hover:bg-slate-800 text-white px-2 py-1 rounded-lg border border-slate-700 text-[10px] font-bold flex items-center gap-1 pointer-events-auto cursor-pointer"
+                        title="احتواء جميع المناديب الظاهرين على الخريطة"
                       >
-                        <title>
-                          {matchedTeam
-                            ? `${matchedTeam.teamName}: ${matchedTeam.hours} ساعة`
-                            : 'قطاع تشغيلي'}
-                        </title>
-                      </path>
-                    );
-                  })}
-                </svg>
+                        <LocateFixed className="w-3 h-3 text-violet-400" />
+                        <span>احتواء ({overviewRepsWithGps.length})</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* زر مباشر لتشغيل المحاكاة إذا لم تتوفر إحداثيات GPS نشطة حالياً */}
+                {mapsApiKey && overviewRepsWithGps.length === 0 && (
+                  <div className="absolute bottom-2.5 right-2.5 left-2.5 bg-slate-900/92 text-white p-2.5 rounded-xl border border-slate-700 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <span className="text-slate-200 font-bold">
+                      لا توجد إشارات GPS مسجلة حالياً ضمن هذا الفلتر
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleRunSimScenario('balanced_fleet')}
+                      className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold flex items-center gap-1 cursor-pointer shrink-0"
+                    >
+                      <FlaskConical className="w-3.5 h-3.5" />
+                      <span>تشغيل محاكاة لاختبار السيستم</span>
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {/* جدول القطاعات / الفرق التفاعلي (4 أعمدة مطابقة للصورة) */}
-              <div className="overflow-x-auto">
-                <table className="w-full text-right text-xs border-collapse">
-                  <thead>
-                    <tr className="border-b border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400">
-                      <th className="py-2 font-bold">الفريق / القطاع</th>
-                      <th className="py-2 font-bold">
-                        <button
-                          type="button"
-                          onClick={() => setRegionSortBy('hours')}
-                          className="hover:text-violet-400 cursor-pointer"
-                        >
-                          الساعات {regionSortBy === 'hours' ? '▾' : ''}
-                        </button>
-                      </th>
-                      <th className="py-2 font-bold">
-                        <button
-                          type="button"
-                          onClick={() => setRegionSortBy('delta')}
-                          className="hover:text-violet-400 cursor-pointer"
-                        >
-                          النمو {regionSortBy === 'delta' ? '▾' : ''}
-                        </button>
-                      </th>
-                      <th className="py-2 font-bold text-left">
-                        <button
-                          type="button"
-                          onClick={() => setRegionSortBy('absence')}
-                          className="hover:text-violet-400 cursor-pointer"
-                        >
-                          الغياب % {regionSortBy === 'absence' ? '▾' : ''}
-                        </button>
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70">
-                    {teamRegions.slice(0, 5).map((row) => (
-                      <tr
-                        key={row.teamId}
-                        onClick={() => openTeamDrillDown(row)}
-                        className="hover:bg-slate-50 dark:hover:bg-[#151E36] transition-colors cursor-pointer group/tr"
+              {/* 4. ملخص التفاصيل الفوري هنا: مؤشرات التنبيهات القابلة للفلترة + بطاقة المندوب المحدد + التبويب المزدوج */}
+              <div className="space-y-2.5">
+                {/* شريط مؤشرات الملخص السريع (قابلة للضغط لفلترة الخريطة والقائمة فوراً) */}
+                <div className="grid grid-cols-4 gap-1.5 text-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOverviewAlertFilter('all');
+                      setOverviewMapTab('live_reps');
+                    }}
+                    className={`p-2 rounded-xl border transition-colors cursor-pointer ${
+                      overviewAlertFilter === 'all' && overviewMapTab === 'live_reps'
+                        ? 'bg-violet-50 dark:bg-violet-950/40 border-violet-500 text-violet-900 dark:text-violet-200'
+                        : 'bg-slate-50 dark:bg-[#131C34] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300'
+                    }`}
+                  >
+                    <span className="block text-[10px] font-bold opacity-80">
+                      العاملون
+                    </span>
+                    <span className="text-sm font-extrabold font-mono tabular-nums">
+                      {liveCardStats.total}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOverviewAlertFilter((prev) =>
+                        prev === 'red' ? 'all' : 'red'
+                      );
+                      setOverviewMapTab('live_reps');
+                    }}
+                    className={`p-2 rounded-xl border transition-colors cursor-pointer ${
+                      overviewAlertFilter === 'red'
+                        ? 'bg-rose-50 dark:bg-rose-950/60 border-rose-500 text-rose-800 dark:text-rose-200'
+                        : 'bg-slate-50 dark:bg-[#131C34] border-slate-200 dark:border-slate-800 text-rose-600 dark:text-rose-400'
+                    }`}
+                  >
+                    <span className="block text-[10px] font-bold">أحمر 🔴</span>
+                    <span className="text-sm font-extrabold font-mono tabular-nums">
+                      {liveCardStats.red}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOverviewAlertFilter((prev) =>
+                        prev === 'orange' ? 'all' : 'orange'
+                      );
+                      setOverviewMapTab('live_reps');
+                    }}
+                    className={`p-2 rounded-xl border transition-colors cursor-pointer ${
+                      overviewAlertFilter === 'orange'
+                        ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-500 text-amber-800 dark:text-amber-200'
+                        : 'bg-slate-50 dark:bg-[#131C34] border-slate-200 dark:border-slate-800 text-amber-600 dark:text-amber-400'
+                    }`}
+                  >
+                    <span className="block text-[10px] font-bold">برتقالي 🟠</span>
+                    <span className="text-sm font-extrabold font-mono tabular-nums">
+                      {liveCardStats.orange}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOverviewAlertFilter((prev) =>
+                        prev === 'normal' ? 'all' : 'normal'
+                      );
+                      setOverviewMapTab('live_reps');
+                    }}
+                    className={`p-2 rounded-xl border transition-colors cursor-pointer ${
+                      overviewAlertFilter === 'normal'
+                        ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-500 text-emerald-800 dark:text-emerald-200'
+                        : 'bg-slate-50 dark:bg-[#131C34] border-slate-200 dark:border-slate-800 text-emerald-600 dark:text-emerald-400'
+                    }`}
+                  >
+                    <span className="block text-[10px] font-bold">سليم 🟢</span>
+                    <span className="text-sm font-extrabold font-mono tabular-nums">
+                      {liveCardStats.normal}
+                    </span>
+                  </button>
+                </div>
+
+                {/* بطاقة ملخص المندوب المحدد مباشرة داخل الواجهة عند النقر على الخريطة أو القائمة */}
+                {selectedMapRep && (
+                  <div className="rounded-xl border border-violet-400/70 dark:border-violet-500/60 bg-violet-50/50 dark:bg-[#141D38] p-3 space-y-2 text-[11px]">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-extrabold text-slate-900 dark:text-white truncate">
+                            {selectedMapRep.employee.fullName}
+                          </span>
+                          <span className="font-mono tabular-nums text-[10px] px-1.5 py-0.5 rounded bg-slate-200/80 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold">
+                            {selectedMapRep.employee.employeeCode}
+                          </span>
+                          <span className="font-mono tabular-nums text-[10px] px-1.5 py-0.5 rounded bg-violet-600 text-white font-bold">
+                            {selectedMapRep.telemetry.batch}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
+                          {selectedMapRep.statusLabelAr} ·{' '}
+                          {formatGpsAgeAr(
+                            Math.max(
+                              0,
+                              nowMs - selectedMapRep.telemetry.gpsUpdatedAtMs
+                            ),
+                            selectedMapRep.telemetry.gpsUpdatedAtMs
+                          )}
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setSelectedMapRepId(null)}
+                        className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-500 cursor-pointer"
+                        title="إغلاق بطاقة المندوب المحدد"
                       >
-                        <td className="py-2.5 font-bold text-slate-800 dark:text-slate-200 group-hover/tr:text-violet-500 dark:group-hover/tr:text-violet-300 truncate max-w-[130px]">
-                          {row.teamName}
-                        </td>
-                        <td className="py-2.5 font-mono tabular-nums font-bold text-slate-900 dark:text-white">
-                          {row.hours} س
-                        </td>
-                        <td
-                          className={`py-2.5 font-mono tabular-nums font-bold ${
-                            row.deltaPct >= 0
-                              ? 'text-emerald-600 dark:text-emerald-400'
-                              : 'text-rose-600 dark:text-rose-400'
-                          }`}
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-1.5 text-center">
+                      <div className="rounded-lg bg-white dark:bg-[#0E1528] border border-slate-200 dark:border-slate-800 p-1.5">
+                        <span className="block text-[9px] text-slate-500 dark:text-slate-400">
+                          المحفظة الحالية
+                        </span>
+                        <span className="font-mono tabular-nums font-extrabold text-slate-900 dark:text-white">
+                          {selectedMapRep.telemetry.walletBalance.toLocaleString(
+                            'ar-EG'
+                          )}{' '}
+                          ج.م
+                        </span>
+                      </div>
+                      <div className="rounded-lg bg-white dark:bg-[#0E1528] border border-slate-200 dark:border-slate-800 p-1.5">
+                        <span className="block text-[9px] text-slate-500 dark:text-slate-400">
+                          الأداء الفعلي
+                        </span>
+                        <span className="font-mono tabular-nums font-extrabold text-emerald-600 dark:text-emerald-400">
+                          {selectedMapRep.summary.performanceRate !== null
+                            ? `${selectedMapRep.summary.performanceRate}%`
+                            : '—'}
+                        </span>
+                      </div>
+                      <div className="rounded-lg bg-white dark:bg-[#0E1528] border border-slate-200 dark:border-slate-800 p-1.5">
+                        <span className="block text-[9px] text-slate-500 dark:text-slate-400">
+                          حضور / غياب
+                        </span>
+                        <span className="font-mono tabular-nums font-extrabold text-slate-800 dark:text-slate-200">
+                          {selectedMapRep.summary.workedDays}ي /{' '}
+                          <span className="text-rose-500">
+                            {selectedMapRep.summary.absentDays}غ
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+
+                    {selectedMapRep.alerts.length > 0 && (
+                      <div className="space-y-1">
+                        {selectedMapRep.alerts.map((al) => (
+                          <div
+                            key={al.episodeKey}
+                            className={`px-2 py-1 rounded-md text-[10px] font-extrabold flex items-center gap-1.5 ${
+                              al.severity === 'red'
+                                ? 'bg-rose-600/15 text-rose-700 dark:text-rose-300 border border-rose-500/30'
+                                : 'bg-amber-500/15 text-amber-800 dark:text-amber-300 border border-amber-500/30'
+                            }`}
+                          >
+                            <AlertTriangle className="w-3 h-3 shrink-0" />
+                            <span>{al.reason}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-end gap-1.5 pt-0.5">
+                      <button
+                        type="button"
+                        onClick={() => openLiveRepDrillDown(selectedMapRep)}
+                        className="px-2.5 py-1 rounded-md bg-violet-600 hover:bg-violet-500 text-white text-[10px] font-extrabold cursor-pointer"
+                      >
+                        ملخص موسع
+                      </button>
+                      {!simulation.usesSyntheticFleet && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onOpenMonthlyGridWithFilter({
+                              search: selectedMapRep.employee.employeeCode,
+                            })
+                          }
+                          className="px-2.5 py-1 rounded-md bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-[10px] font-bold cursor-pointer"
                         >
-                          {row.deltaPct >= 0 ? '▲' : '▼'} {Math.abs(row.deltaPct)}%
-                        </td>
-                        <td className="py-2.5 font-mono tabular-nums text-slate-700 dark:text-slate-200 text-left">
-                          {row.absencePct.toFixed(2)}%
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                          سجل الشهر
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* تبويب التبديل السريع بين: (ملخص المناديب والتنبيهات حسب الأولوية) و (ملخص الفرق والقطاعات) */}
+                <div className="flex items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-2">
+                  <div className="inline-flex items-center rounded-lg bg-slate-100 dark:bg-[#131C34] p-0.5 border border-slate-200 dark:border-slate-800 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setOverviewMapTab('live_reps')}
+                      className={`px-2.5 py-1 rounded-md font-extrabold transition-colors cursor-pointer ${
+                        overviewMapTab === 'live_reps'
+                          ? 'bg-violet-600 text-white'
+                          : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      ملخص المناديب ({filteredLiveReps.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOverviewMapTab('teams')}
+                      className={`px-2.5 py-1 rounded-md font-extrabold transition-colors cursor-pointer ${
+                        overviewMapTab === 'teams'
+                          ? 'bg-violet-600 text-white'
+                          : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      ملخص الفرق ({teamRegions.length})
+                    </button>
+                  </div>
+
+                  <span className="text-[10px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                    متصل: {liveCardStats.onlineGps} · Offline:{' '}
+                    {liveCardStats.offline}
+                  </span>
+                </div>
+
+                {overviewMapTab === 'live_reps' ? (
+                  filteredLiveReps.length === 0 ? (
+                    <div className="py-5 text-center space-y-2 text-xs text-slate-500 dark:text-slate-400">
+                      <p>لا يوجد مناديب مطابقون للفلتر المحدد حالياً.</p>
+                      {!simulation.isActive && (
+                        <button
+                          type="button"
+                          onClick={() => handleRunSimScenario('balanced_fleet')}
+                          className="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <FlaskConical className="w-3.5 h-3.5" />
+                          <span>تشغيل محاكاة اختبار السيستم</span>
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="max-h-52 overflow-y-auto space-y-1.5 pr-0.5">
+                      {filteredLiveReps.slice(0, 12).map((item, idx) => {
+                        const isSelected =
+                          selectedMapRep?.employee.id === item.employee.id;
+                        const dotClass =
+                          item.primarySeverity === 'red'
+                            ? 'bg-rose-600'
+                            : item.primarySeverity === 'orange'
+                            ? 'bg-amber-500'
+                            : item.connectionState === 'online'
+                            ? 'bg-emerald-500'
+                            : 'bg-slate-400';
+
+                        return (
+                          <button
+                            key={item.employee.id}
+                            type="button"
+                            onClick={() => setSelectedMapRepId(item.employee.id)}
+                            className={`w-full text-right p-2 rounded-xl border transition-colors flex items-center justify-between gap-2 cursor-pointer text-xs ${
+                              isSelected
+                                ? 'bg-violet-50 dark:bg-[#192342] border-violet-500'
+                                : item.primarySeverity === 'red'
+                                ? 'bg-rose-50/50 dark:bg-rose-950/25 border-rose-200 dark:border-rose-900/60 hover:border-rose-400'
+                                : item.primarySeverity === 'orange'
+                                ? 'bg-amber-50/50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-900/60 hover:border-amber-400'
+                                : 'bg-slate-50/70 dark:bg-[#121A30] border-slate-200/80 dark:border-slate-800 hover:border-violet-400/60'
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[10px] font-mono tabular-nums text-slate-400 font-bold">
+                                  #{idx + 1}
+                                </span>
+                                <span
+                                  className={`w-2 h-2 rounded-full shrink-0 ${dotClass}`}
+                                />
+                                <span className="font-extrabold text-slate-900 dark:text-white truncate">
+                                  {item.employee.fullName}
+                                </span>
+                                <span className="text-[10px] font-mono tabular-nums text-slate-500 dark:text-slate-400 shrink-0">
+                                  {item.employee.employeeCode}
+                                </span>
+                              </div>
+                              <div className="text-[10px] mt-0.5 truncate">
+                                {item.alerts.length > 0 ? (
+                                  <span
+                                    className={`font-bold ${
+                                      item.primarySeverity === 'red'
+                                        ? 'text-rose-600 dark:text-rose-400'
+                                        : 'text-amber-600 dark:text-amber-400'
+                                    }`}
+                                  >
+                                    {item.alerts.map((a) => a.reason).join(' · ')}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-500 dark:text-slate-400">
+                                    أداء:{' '}
+                                    {item.summary.performanceRate !== null
+                                      ? `${item.summary.performanceRate}%`
+                                      : '—'}{' '}
+                                    · ساعات: {item.summary.totalHours} س ·{' '}
+                                    {item.connectionState === 'online'
+                                      ? 'متصل'
+                                      : 'Offline'}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="text-left shrink-0">
+                              <span className="block text-[10px] font-mono tabular-nums font-extrabold text-violet-600 dark:text-violet-300">
+                                {item.telemetry.batch}
+                              </span>
+                              <span className="inline-flex items-center gap-0.5 text-[11px] font-mono tabular-nums font-extrabold text-slate-900 dark:text-white">
+                                <Wallet className="w-3 h-3 text-slate-400" />
+                                {item.telemetry.walletBalance.toLocaleString(
+                                  'ar-EG'
+                                )}{' '}
+                                ج
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )
+                ) : (
+                  /* جدول القطاعات / الفرق التفاعلي (4 أعمدة محفوظة بالكامل) */
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-right text-xs border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400">
+                          <th className="py-2 font-bold">الفريق / القطاع</th>
+                          <th className="py-2 font-bold">
+                            <button
+                              type="button"
+                              onClick={() => setRegionSortBy('hours')}
+                              className="hover:text-violet-400 cursor-pointer"
+                            >
+                              الساعات {regionSortBy === 'hours' ? '▾' : ''}
+                            </button>
+                          </th>
+                          <th className="py-2 font-bold">
+                            <button
+                              type="button"
+                              onClick={() => setRegionSortBy('delta')}
+                              className="hover:text-violet-400 cursor-pointer"
+                            >
+                              النمو {regionSortBy === 'delta' ? '▾' : ''}
+                            </button>
+                          </th>
+                          <th className="py-2 font-bold text-left">
+                            <button
+                              type="button"
+                              onClick={() => setRegionSortBy('absence')}
+                              className="hover:text-violet-400 cursor-pointer"
+                            >
+                              الغياب % {regionSortBy === 'absence' ? '▾' : ''}
+                            </button>
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70">
+                        {teamRegions.slice(0, 5).map((row) => (
+                          <tr
+                            key={row.teamId}
+                            onClick={() => openTeamDrillDown(row)}
+                            className="hover:bg-slate-50 dark:hover:bg-[#151E36] transition-colors cursor-pointer group/tr"
+                          >
+                            <td className="py-2 font-bold text-slate-800 dark:text-slate-200 group-hover/tr:text-violet-500 dark:group-hover/tr:text-violet-300 truncate max-w-[130px]">
+                              {row.teamName}
+                            </td>
+                            <td className="py-2 font-mono tabular-nums font-bold text-slate-900 dark:text-white">
+                              {row.hours} س
+                            </td>
+                            <td
+                              className={`py-2 font-mono tabular-nums font-bold ${
+                                row.deltaPct >= 0
+                                  ? 'text-emerald-600 dark:text-emerald-400'
+                                  : 'text-rose-600 dark:text-rose-400'
+                              }`}
+                            >
+                              {row.deltaPct >= 0 ? '▲' : '▼'} {Math.abs(row.deltaPct)}%
+                            </td>
+                            <td className="py-2 font-mono tabular-nums text-slate-700 dark:text-slate-200 text-left">
+                              {row.absencePct.toFixed(2)}%
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             </div>
 

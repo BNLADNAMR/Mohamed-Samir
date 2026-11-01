@@ -31,6 +31,7 @@ import {
   Sun,
   Moon,
   LogOut,
+  Radio,
 } from 'lucide-react';
 import {
   AppRoutePage,
@@ -154,6 +155,14 @@ export const AppSectionsDrawer: React.FC<AppSectionsDrawerProps> = ({
           <LayoutDashboard
             className={`${baseClass} ${
               !isActive ? 'text-violet-600 dark:text-violet-400' : ''
+            }`}
+          />
+        );
+      case 'live_map':
+        return (
+          <Radio
+            className={`${baseClass} ${
+              !isActive ? 'text-rose-600 dark:text-rose-400' : ''
             }`}
           />
         );

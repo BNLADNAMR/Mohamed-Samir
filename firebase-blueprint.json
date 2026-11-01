@@ -190,6 +190,54 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["policyId", "allowSupervisorLeaveRecommendation", "allowViewerExport", "allowOpsIntegrationSync", "enforceAdminMfaNotice", "sessionTimeoutMinutes", "externalSyncEndpoint", "lastExternalSyncStatus", "lastExternalSyncImported", "lastExternalSyncFailed", "lastExternalSyncTime", "updatedBy", "updatedAt"]
+    },
+    "RepLiveTelemetry": {
+      "title": "RepLiveTelemetry",
+      "description": "Real-time GPS coordinates, wallet balance (EGP), batch assignment, and online status for delivery representatives.",
+      "type": "object",
+      "properties": {
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "teamId": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "batch": { "type": "string", "enum": ["Batch 1", "Batch 2", "Batch 3", "Batch 4", "Batch 5", "Batch 6"] },
+        "walletBalance": { "type": "number", "description": "Current wallet balance in EGP (0..10000000)" },
+        "hasGpsFix": { "type": "boolean" },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "accuracy": { "type": "number" },
+        "isOnline": { "type": "boolean" },
+        "gpsUpdatedAtMs": { "type": "number" },
+        "updatedBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["employeeId", "teamId", "userId", "batch", "walletBalance", "hasGpsFix", "lat", "lng", "accuracy", "isOnline", "gpsUpdatedAtMs", "updatedBy", "createdAt", "updatedAt"]
+    },
+    "RepSmartAlertLog": {
+      "title": "RepSmartAlertLog",
+      "description": "Historical smart alert episode log recording Red performance alerts and Orange wallet alerts with trigger and resolution timestamps.",
+      "type": "object",
+      "properties": {
+        "alertId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "employeeId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "employeeCode": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "employeeName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "teamId": { "type": "string", "maxLength": 128 },
+        "severity": { "type": "string", "enum": ["red", "orange"] },
+        "alertType": { "type": "string", "enum": ["performance_red", "wallet_batch_456", "wallet_batch_123"] },
+        "reason": { "type": "string", "minLength": 2, "maxLength": 300 },
+        "batch": { "type": "string", "enum": ["Batch 1", "Batch 2", "Batch 3", "Batch 4", "Batch 5", "Batch 6"] },
+        "walletBalance": { "type": "number" },
+        "performanceRate": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "resolved"] },
+        "resolvedReason": { "type": "string", "maxLength": 200 },
+        "triggeredAtMs": { "type": "number" },
+        "resolvedAtMs": { "type": "number" },
+        "recordedBy": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["alertId", "employeeId", "employeeCode", "employeeName", "teamId", "severity", "alertType", "reason", "batch", "walletBalance", "performanceRate", "status", "resolvedReason", "triggeredAtMs", "resolvedAtMs", "recordedBy", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -224,6 +272,15 @@
     "/securitySettings/{policyId}": {
       "schema": "SecurityPolicyConfig",
       "description": "Non-secret system security policies and external sync telemetry."
+    },
+    "/repLiveLocations/{employeeId}": {
+      "schema": "RepLiveTelemetry",
+      "description": "Live GPS telemetry, wallet balances, and batch assignments for working representatives."
+    },
+    "/repAlertLogs/{alertId}": {
+      "schema": "RepSmartAlertLog",
+      "description": "Historical log of Red performance alerts and Orange wallet alerts."
     }
   }
 }
+

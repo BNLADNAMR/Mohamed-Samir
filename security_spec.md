@@ -10,6 +10,8 @@
 6. **Operations Manager Operational Scope**: An `operations_manager` can view/manage operational data (`employees`, `teams`, `attendance`, `requests`) and read operational `auditLogs` (`category == 'operational'`), but CANNOT create/modify `users`, CANNOT create a `super_admin`, and CANNOT modify `securitySettings`.
 7. **Viewer Read-Only Gate**: A `viewer` has zero write permissions (`create`, `update`, `delete` are strictly false across all collections).
 8. **Immutable Audit Trail**: `/auditLogs/{logId}` allows `create` with server timestamp (`request.time`) and `actorUserId == request.auth.uid`, and strictly forbids `update` and `delete` (`if false`) for ALL roles including Super Admin.
+9. **Live Telemetry & Wallet Integrity (`/repLiveLocations/{employeeId}`)**: Every telemetry record must correspond to an existing `/employees/{employeeId}` document. A `delivery_rep` can ONLY broadcast/update their own GPS coordinates and `isOnline` status (`affectedKeys().hasOnly(['hasGpsFix', 'lat', 'lng', 'accuracy', 'isOnline', 'gpsUpdatedAtMs', 'updatedBy', 'updatedAt'])`), and can NEVER forge or alter `walletBalance`, `batch`, or `teamId` (on initial self-create, `walletBalance` must be `0`). Supervisors are strictly scoped to their own `teamId`.
+10. **Smart Alert Log Terminal State Locking (`/repAlertLogs/{alertId}`)**: Alert logs are scoped by `teamId` / `employeeId` on `get` and `list` without O(n) cross-document lookups. Once an alert reaches terminal `status == 'resolved'`, non-Super-Admin users cannot reopen or tamper with resolved alerts.
 
 ---
 
@@ -18,12 +20,13 @@
 1. **Payload 1 (Self-Assigned Super Admin on Signup)**: Authenticated uninvited user writes `/users/attacker_uid` with `{ role: "super_admin", status: "active" }` → `PERMISSION_DENIED`.
 2. **Payload 2 (Shadow Field Injection)**: Authenticated `super_admin` updates `/employees/EMP001` adding ghost key `{ isBypassed: true }` → `PERMISSION_DENIED` (`hasOnly` schema rejection).
 3. **Payload 3 (Unverified Admin Email Spoof)**: Attacker with `email: "aladdinamrr@gmail.com"` and `email_verified: false` attempts to bootstrap `/users/spoof_uid` → `PERMISSION_DENIED`.
-4. **Payload 4 (Delivery Rep Cross-Employee Snooping)**: `delivery_rep` (`employeeId: "EMP001"`) queries `/attendance/EMP002_2026-10-01` → `PERMISSION_DENIED`.
-5. **Payload 5 (Delivery Rep Direct Attendance Tampering)**: `delivery_rep` attempts `update` on `/attendance/EMP001_2026-10-01` to set `attendance: "worked"` → `PERMISSION_DENIED`.
-6. **Payload 6 (Supervisor Cross-Team Access)**: `supervisor` (`teamId: "TEAM_A"`) attempts to read or record attendance for employee in `TEAM_B` → `PERMISSION_DENIED`.
+4. **Payload 4 (Delivery Rep Cross-Employee Snooping)**: `delivery_rep` (`employeeId: "EMP001"`) queries `/attendance/EMP002_2026-10-01` or `/repLiveLocations/EMP002` → `PERMISSION_DENIED`.
+5. **Payload 5 (Delivery Rep Wallet Tampering)**: `delivery_rep` attempts `update` on `/repLiveLocations/EMP001` modifying `walletBalance: 50` to evade an Orange wallet alert → `PERMISSION_DENIED`.
+6. **Payload 6 (Supervisor Cross-Team Access)**: `supervisor` (`teamId: "TEAM_A"`) attempts to read or update telemetry/attendance for employee in `TEAM_B` → `PERMISSION_DENIED`.
 7. **Payload 7 (Supervisor Self-Escalation)**: `supervisor` updates own `/users/sup_uid` setting `role: "operations_manager"` → `PERMISSION_DENIED`.
 8. **Payload 8 (Operations Manager Creating Super Admin)**: `operations_manager` writes `/preprovisionedUsers/new_admin` with `role: "super_admin"` → `PERMISSION_DENIED`.
-9. **Payload 9 (Viewer Mutation Attempt)**: `viewer` attempts to update `/Attendance` or create `/employees` → `PERMISSION_DENIED`.
-10. **Payload 10 (Disabled Account Access)**: User with `status: "disabled"` attempts to read own `/employees/EMP001` or create a `/requests` doc → `PERMISSION_DENIED`.
-11. **Payload 11 (Audit Log Deletion / Tampering)**: `super_admin` attempts `delete` or `update` on `/auditLogs/log_123` → `PERMISSION_DENIED`.
-12. **Payload 12 (Denial-of-Wallet Oversized String / Forged Timestamp)**: User creates `/requests/req_1` with a 50KB `description` or forged `createdAt` != `request.time` → `PERMISSION_DENIED`.
+9. **Payload 9 (Viewer Mutation Attempt)**: `viewer` attempts to update `/repLiveLocations/EMP001` or create `/repAlertLogs/al_1` → `PERMISSION_DENIED`.
+10. **Payload 10 (Disabled Account Access)**: User with `status: "disabled"` attempts to read own `/employees/EMP001` or broadcast GPS to `/repLiveLocations/EMP001` → `PERMISSION_DENIED`.
+11. **Payload 11 (Audit Log & Resolved Alert Tampering)**: `super_admin` attempts `delete` on `/auditLogs/log_123`, or `operations_manager` attempts to mutate a `'resolved'` `/repAlertLogs/al_1` → `PERMISSION_DENIED`.
+12. **Payload 12 (Denial-of-Wallet Oversized String / Out-of-Range GPS / Forged Timestamp)**: User writes `/repLiveLocations/EMP001` with `lat: 999` or forged `updatedAt` != `request.time` → `PERMISSION_DENIED`.
+

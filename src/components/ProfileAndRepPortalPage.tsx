@@ -22,6 +22,9 @@ import {
   RotateCcw,
   Fingerprint,
   Layers,
+  MapPin,
+  Radio,
+  Wallet,
 } from 'lucide-react';
 import {
   AccountSecurityUpdateInput,
@@ -32,6 +35,7 @@ import {
   MonthDay,
   PersonalInfoUpdateInput,
   ProfileSectionId,
+  RepLiveTelemetry,
   SecurityPolicySettings,
   Team,
   UserProfile,
@@ -49,6 +53,10 @@ import {
 } from '../utils/profileSecurity';
 import { MONTH_NAMES, getDayTemporalState } from '../utils/shiftCalculations';
 import { REQUEST_STATUS_LABELS, REQUEST_TYPE_LABELS } from './RequestsPage';
+import {
+  broadcastOwnRepGpsLocation,
+  stopOwnRepGpsBroadcast,
+} from '../services/firestoreService';
 
 interface ProfileAndRepPortalPageProps {
   mode: 'my_portal' | 'profile';
@@ -90,6 +98,7 @@ interface ProfileAndRepPortalPageProps {
   onSendPasswordReset: (email: string) => Promise<string>;
   onLogout: () => Promise<void>;
   onNotify: (msg: string, type?: 'success' | 'info' | 'warning' | 'error') => void;
+  myLiveTelemetry?: RepLiveTelemetry | null;
 }
 
 function formatReadableDateTimeAr(isoStr?: string): string {
@@ -138,6 +147,7 @@ export const ProfileAndRepPortalPage: React.FC<ProfileAndRepPortalPageProps> = (
   onSendPasswordReset,
   onLogout,
   onNotify,
+  myLiveTelemetry,
 }) => {
   // ---------------------------------------------------------------------------
   // القسم 1: حالة النموذج اليدوي للمعلومات الشخصية
@@ -295,6 +305,66 @@ export const ProfileAndRepPortalPage: React.FC<ProfileAndRepPortalPageProps> = (
   );
 
   const mySummary = myEmployee ? summaries[myEmployee.id] : null;
+
+  // بث الموقع المباشر GPS للمندوب أثناء العمل بموافقة صريحة قابلة للإيقاف الفوري
+  const [isSharingLiveGps, setIsSharingLiveGps] = useState(false);
+  const [gpsWatchError, setGpsWatchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isSharingLiveGps || !myEmployee) return;
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      setGpsWatchError('المتصفح الحالي لا يدعم مشاركة الموقع الجغرافي GPS.');
+      setIsSharingLiveGps(false);
+      return;
+    }
+
+    let lastSentMs = 0;
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const now = Date.now();
+        // إرسال التحديث بفاصل لا يقل عن 12 ثانية لمنع استنزاف البطارية أو الحصة
+        if (now - lastSentMs < 12_000) return;
+        lastSentMs = now;
+        setGpsWatchError(null);
+        void broadcastOwnRepGpsLocation({
+          actor: currentUser,
+          employee: myEmployee,
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+        }).catch(() => {
+          setGpsWatchError('تعذر مزامنة إحداثيات GPS مع السحابة.');
+        });
+      },
+      (err) => {
+        setGpsWatchError(
+          err.code === 1
+            ? 'تم إيقاف إذن الوصول للموقع الجغرافي من إعدادات المتصفح.'
+            : 'تعذر التقاط إشارة GPS حالياً — سيتم المحاولة تلقائياً.'
+        );
+      },
+      { enableHighAccuracy: true, maximumAge: 10_000, timeout: 15_000 }
+    );
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [isSharingLiveGps, myEmployee, currentUser]);
+
+  const handleStopLiveGpsSharing = async () => {
+    setIsSharingLiveGps(false);
+    setGpsWatchError(null);
+    if (!myEmployee) return;
+    try {
+      await stopOwnRepGpsBroadcast({
+        actor: currentUser,
+        employee: myEmployee,
+      });
+      onNotify('تم إيقاف مشاركة الموقع المباشر وتحديث حالتك إلى Offline.', 'info');
+    } catch {
+      onNotify('تم إيقاف تتبع المتصفح المحلي.', 'info');
+    }
+  };
 
   const myRequests = useMemo(
     () =>
@@ -1838,6 +1908,67 @@ export const ProfileAndRepPortalPage: React.FC<ProfileAndRepPortalPageProps> = (
         </div>
       ) : (
         <>
+          {/* بطاقة البث المباشر لموقع المندوب أثناء العمل + عرض المحفظة والباتش الحالي */}
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 sm:p-5 flex flex-wrap items-center justify-between gap-4 text-xs">
+            <div className="space-y-1 max-w-2xl">
+              <div className="flex flex-wrap items-center gap-2">
+                <Radio
+                  className={`w-4 h-4 ${
+                    isSharingLiveGps || myLiveTelemetry?.isOnline
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-slate-400'
+                  }`}
+                />
+                <h2 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                  حالة العمل الميداني المباشر والمحفظة والباتش
+                </h2>
+                <span className="px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 font-mono tabular-nums font-extrabold text-indigo-700 dark:text-indigo-300">
+                  {myLiveTelemetry?.batch || 'Batch 1'}
+                </span>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-mono tabular-nums font-extrabold text-slate-900 dark:text-white">
+                  <Wallet className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                  {(myLiveTelemetry?.walletBalance ?? 0).toLocaleString('ar-EG')} ج.م
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                عند تفعيل مشاركة الموقع أثناء نوبة العمل، يُعرض موقعك الجغرافي للمشرف وإدارة التشغيل على خريطة المتابعة الحية. يمكنك إيقاف المشاركة في أي لحظة بضغطة واحدة.
+              </p>
+              {gpsWatchError && (
+                <p className="text-[11px] font-bold text-rose-600 dark:text-rose-400">
+                  {gpsWatchError}
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {isSharingLiveGps ? (
+                <button
+                  type="button"
+                  onClick={handleStopLiveGpsSharing}
+                  className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-extrabold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <MapPin className="w-4 h-4" />
+                  <span>إيقاف مشاركة الموقع (Offline)</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsSharingLiveGps(true);
+                    onNotify(
+                      'تم تفعيل البث المباشر لموقع العمل GPS بموافقتك.',
+                      'success'
+                    );
+                  }}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <MapPin className="w-4 h-4" />
+                  <span>تفعيل مشاركة الموقع المباشر (Online GPS)</span>
+                </button>
+              )}
+            </div>
+          </div>
+
           {/* مؤشرات الأداء الشخصية */}
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4">

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Search,
   ChevronRight,
@@ -21,6 +21,7 @@ import {
   ArrowRight,
   Home,
   Menu,
+  Radio,
 } from 'lucide-react';
 import {
   collection,
@@ -40,6 +41,9 @@ import {
   MonthDay,
   PreprovisionedInvitation,
   ProfileSectionId,
+  RepAlertLogRecord,
+  RepBatchId,
+  RepLiveTelemetry,
   ShiftSelectionStatus,
   Team,
   ToastNotification,
@@ -56,8 +60,10 @@ import {
   safeLoadFromStorage,
   safeSaveToStorage,
 } from './utils/shiftCalculations';
+import { APIProvider } from '@vis.gl/react-google-maps';
 import {
   canAccessRoute,
+  canEditRepLiveTelemetry,
   canRecordOrEditAttendance,
   getDefaultRouteForRole,
   hasPermission,
@@ -65,14 +71,17 @@ import {
 } from './utils/rbac';
 import {
   clearAllOperationalDataFirestore,
+  createRepSmartAlertLog,
   deleteAttendanceFirestore,
   deleteEmployeeFirestore,
   formatFirestoreTimestamp,
   migrateLocalDataToFirestore,
   recordAuditLog,
+  resolveRepSmartAlertLog,
   saveAttendanceFirestore,
   saveEmployeeFirestore,
   saveSecurityPolicySettings,
+  upsertRepLiveTelemetry,
 } from './services/firestoreService';
 import {
   AuthProvider,
@@ -112,9 +121,27 @@ import {
 } from './utils/navigationHistory';
 import { AppSectionsDrawer } from './components/AppSectionsDrawer';
 import { DrawerQuickActionId } from './utils/sectionsCatalog';
+import { LiveMonitoringDashboard } from './components/LiveMonitoringDashboard';
+import {
+  ActiveEpisodeTrackerEntry,
+  buildMonitoredRepresentatives,
+  isValidRepBatch,
+  playSmartAlertSound,
+  reconcileAlertEpisodes,
+} from './utils/liveMonitoringEngine';
+import {
+  LiveSimulationController,
+  LiveSimulationState,
+  SIMULATION_SCENARIO_LABELS_AR,
+  SimulationScenarioId,
+  advanceSimulationGpsStep,
+  applySimulationScenario,
+  createInactiveSimulationState,
+} from './utils/liveSimulationEngine';
 
 const VALID_ROUTES: Set<string> = new Set([
   'dashboard',
+  'live_monitoring',
   'monthly_grid',
   'analytics',
   'my_portal',
@@ -217,8 +244,39 @@ function AuthenticatedWorkspace({
   const [invitations, setInvitations] = useState<PreprovisionedInvitation[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
   const [myAccountAuditLogs, setMyAccountAuditLogs] = useState<AuditLogItem[]>([]);
+  const [liveTelemetryMap, setLiveTelemetryMap] = useState<
+    Record<string, RepLiveTelemetry>
+  >({});
+  const [repAlertLogs, setRepAlertLogs] = useState<RepAlertLogRecord[]>([]);
+  const [liveClockMs, setLiveClockMs] = useState<number>(() => Date.now());
+  const [alertSoundEnabled, setAlertSoundEnabled] = useState<boolean>(() =>
+    safeLoadFromStorage<boolean>('shift_tracker_live_sound', true)
+  );
+  const [simState, setSimState] = useState<LiveSimulationState>(() =>
+    createInactiveSimulationState()
+  );
+  const [simAlertLogs, setSimAlertLogs] = useState<RepAlertLogRecord[]>([]);
+  const [isSyncingSimCloud, setIsSyncingSimCloud] = useState(false);
   const [isInitialCloudLoaded, setIsInitialCloudLoaded] = useState(false);
   const [isMigratingLocal, setIsMigratingLocal] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setLiveClockMs(Date.now());
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // تحريك تلقائي لإشارات GPS أثناء تفعيل وضع محاكاة اختبار السيستم
+  useEffect(() => {
+    if (!simState.isActive || !simState.isAutoMoving) return;
+    const simTimer = window.setInterval(() => {
+      const now = Date.now();
+      setLiveClockMs(now);
+      setSimState((prev) => advanceSimulationGpsStep(prev, now));
+    }, 2800);
+    return () => window.clearInterval(simTimer);
+  }, [simState.isActive, simState.isAutoMoving]);
 
   // فحص وجود بيانات سابقة في المتصفح لترحيلها بأمان دون فقد أي سجل
   const [legacyLocalEmployees] = useState<Employee[]>(() =>
@@ -881,6 +939,155 @@ function AuthenticatedWorkspace({
       );
     }
 
+    // 8. المواقع المباشرة ومحافظ المناديب والباتشات (repLiveLocations)
+    const parseLiveTelemetryDoc = (
+      docId: string,
+      raw: Record<string, unknown>
+    ): RepLiveTelemetry => ({
+      employeeId: String(raw.employeeId || docId),
+      teamId: String(raw.teamId || ''),
+      userId: String(raw.userId || ''),
+      batch: isValidRepBatch(raw.batch) ? raw.batch : 'Batch 1',
+      walletBalance: Number(raw.walletBalance) || 0,
+      hasGpsFix: Boolean(raw.hasGpsFix),
+      lat: Number(raw.lat) || 0,
+      lng: Number(raw.lng) || 0,
+      accuracy: Number(raw.accuracy) || 0,
+      isOnline: Boolean(raw.isOnline),
+      gpsUpdatedAtMs: Number(raw.gpsUpdatedAtMs) || 0,
+      updatedBy: String(raw.updatedBy || ''),
+      createdAt: formatFirestoreTimestamp(raw.createdAt),
+      updatedAt: formatFirestoreTimestamp(raw.updatedAt),
+    });
+
+    if (
+      currentUser.role === 'super_admin' ||
+      currentUser.role === 'operations_manager' ||
+      currentUser.role === 'viewer'
+    ) {
+      unsubs.push(
+        onSnapshot(
+          collection(db, 'repLiveLocations'),
+          (snap) => {
+            const nextMap: Record<string, RepLiveTelemetry> = {};
+            snap.docs.forEach((d) => {
+              const parsed = parseLiveTelemetryDoc(d.id, d.data());
+              nextMap[parsed.employeeId] = parsed;
+            });
+            setLiveTelemetryMap(nextMap);
+            setLiveClockMs(Date.now());
+          },
+          handleListenerError('Live locations listener warning:')
+        )
+      );
+    } else if (currentUser.role === 'supervisor' && currentUser.teamId) {
+      unsubs.push(
+        onSnapshot(
+          query(
+            collection(db, 'repLiveLocations'),
+            where('teamId', '==', currentUser.teamId)
+          ),
+          (snap) => {
+            const nextMap: Record<string, RepLiveTelemetry> = {};
+            snap.docs.forEach((d) => {
+              const parsed = parseLiveTelemetryDoc(d.id, d.data());
+              nextMap[parsed.employeeId] = parsed;
+            });
+            setLiveTelemetryMap(nextMap);
+            setLiveClockMs(Date.now());
+          },
+          handleListenerError('Team live locations listener warning:')
+        )
+      );
+    } else if (currentUser.role === 'delivery_rep' && currentUser.employeeId) {
+      unsubs.push(
+        onSnapshot(
+          doc(db, 'repLiveLocations', currentUser.employeeId),
+          (docSnap) => {
+            if (docSnap.exists()) {
+              const parsed = parseLiveTelemetryDoc(docSnap.id, docSnap.data());
+              setLiveTelemetryMap({ [parsed.employeeId]: parsed });
+            } else {
+              setLiveTelemetryMap({});
+            }
+          },
+          handleListenerError('Rep live location listener warning:')
+        )
+      );
+    }
+
+    // 9. السجل التاريخي للتنبيهات الذكية للمناديب (repAlertLogs)
+    const parseAlertLogsSnap = (
+      docs: { id: string; data: () => Record<string, unknown> }[]
+    ) => {
+      setRepAlertLogs(
+        docs.map((d) => {
+          const raw = d.data();
+          return {
+            alertId: String(raw.alertId || d.id),
+            employeeId: String(raw.employeeId || ''),
+            employeeCode: String(raw.employeeCode || ''),
+            employeeName: String(raw.employeeName || ''),
+            teamId: String(raw.teamId || ''),
+            severity: raw.severity === 'red' ? 'red' : 'orange',
+            alertType:
+              raw.alertType === 'performance_red' ||
+              raw.alertType === 'wallet_batch_456' ||
+              raw.alertType === 'wallet_batch_123'
+                ? raw.alertType
+                : 'wallet_batch_123',
+            reason: String(raw.reason || ''),
+            batch: isValidRepBatch(raw.batch) ? raw.batch : 'Batch 1',
+            walletBalance: Number(raw.walletBalance) || 0,
+            performanceRate: Number(raw.performanceRate ?? -1),
+            status: raw.status === 'resolved' ? 'resolved' : 'active',
+            resolvedReason: String(raw.resolvedReason || ''),
+            triggeredAtMs: Number(raw.triggeredAtMs) || 0,
+            resolvedAtMs: Number(raw.resolvedAtMs) || 0,
+            recordedBy: String(raw.recordedBy || ''),
+            createdAt: formatFirestoreTimestamp(raw.createdAt),
+            updatedAt: formatFirestoreTimestamp(raw.updatedAt),
+          };
+        })
+      );
+    };
+
+    if (
+      currentUser.role === 'super_admin' ||
+      currentUser.role === 'operations_manager' ||
+      currentUser.role === 'viewer'
+    ) {
+      unsubs.push(
+        onSnapshot(
+          collection(db, 'repAlertLogs'),
+          (snap) => parseAlertLogsSnap(snap.docs),
+          handleListenerError('Rep alert logs listener warning:')
+        )
+      );
+    } else if (currentUser.role === 'supervisor' && currentUser.teamId) {
+      unsubs.push(
+        onSnapshot(
+          query(
+            collection(db, 'repAlertLogs'),
+            where('teamId', '==', currentUser.teamId)
+          ),
+          (snap) => parseAlertLogsSnap(snap.docs),
+          handleListenerError('Team rep alert logs listener warning:')
+        )
+      );
+    } else if (currentUser.role === 'delivery_rep' && currentUser.employeeId) {
+      unsubs.push(
+        onSnapshot(
+          query(
+            collection(db, 'repAlertLogs'),
+            where('employeeId', '==', currentUser.employeeId)
+          ),
+          (snap) => parseAlertLogsSnap(snap.docs),
+          handleListenerError('Self rep alert logs listener warning:')
+        )
+      );
+    }
+
     return () => {
       isUnmounted = true;
       unsubs.forEach((fn) => fn());
@@ -1086,6 +1293,365 @@ function AuthenticatedWorkspace({
     });
     return map;
   }, [employees, monthDaysList, attendanceRecords, currentYear, currentMonth, today]);
+
+  // دمج بيانات المناديب العاملين حالياً مع أدائهم الفعلي بالنظام والقياس المباشر للمواقع والمحافظ (أو لقطة المحاكاة التفاعلية عند تفعيلها)
+  const monitoredRepresentatives = useMemo(
+    () =>
+      buildMonitoredRepresentatives({
+        employees: simState.isActive ? simState.employees : employees,
+        summaries: simState.isActive ? simState.summaries : summaries,
+        attendanceRecords: simState.isActive
+          ? simState.attendanceRecords
+          : attendanceRecords,
+        telemetryMap: simState.isActive ? simState.telemetryMap : liveTelemetryMap,
+        todayStr,
+        nowMs: liveClockMs,
+      }),
+    [
+      simState,
+      employees,
+      summaries,
+      attendanceRecords,
+      liveTelemetryMap,
+      todayStr,
+      liveClockMs,
+    ]
+  );
+
+  const effectiveRepAlertLogs = useMemo(
+    () =>
+      simState.isActive ? [...simAlertLogs, ...repAlertLogs] : repAlertLogs,
+    [simState.isActive, simAlertLogs, repAlertLogs]
+  );
+
+  const activeLiveAlertsCount = useMemo(
+    () =>
+      monitoredRepresentatives.reduce(
+        (sum, item) => sum + item.alerts.length,
+        0
+      ),
+    [monitoredRepresentatives]
+  );
+
+  const activeEpisodesRef = useRef<Map<string, ActiveEpisodeTrackerEntry>>(
+    new Map()
+  );
+  const repAlertLogsRef = useRef<RepAlertLogRecord[]>([]);
+  useEffect(() => {
+    repAlertLogsRef.current = repAlertLogs;
+  }, [repAlertLogs]);
+
+  const handleToggleAlertSound = useCallback(() => {
+    setAlertSoundEnabled((prev) => {
+      const next = !prev;
+      safeSaveToStorage('shift_tracker_live_sound', next);
+      return next;
+    });
+  }, []);
+
+  const canSyncSimulationToCloud = useMemo(() => {
+    const activeRealEmps = employees.filter(
+      (emp) =>
+        emp.status === 'active' &&
+        canEditRepLiveTelemetry(currentUser, emp, securityPolicy)
+    );
+    return activeRealEmps.length > 0;
+  }, [employees, currentUser, securityPolicy]);
+
+  const handleStartOrApplySimScenario = useCallback(
+    (scenario: SimulationScenarioId) => {
+      const now = Date.now();
+      setLiveClockMs(now);
+      setSimState((prev) => {
+        if (!prev.isActive) {
+          activeEpisodesRef.current = new Map();
+        }
+        return applySimulationScenario({
+          realEmployees: employees,
+          realSummaries: summaries,
+          realAttendanceRecords: attendanceRecords,
+          realTelemetryMap: liveTelemetryMap,
+          previousState: prev,
+          scenario,
+          todayStr,
+          nowMs: now,
+        });
+      });
+      showToast(
+        `وضع محاكاة النظام: تم تطبيق «${SIMULATION_SCENARIO_LABELS_AR[scenario]}»`,
+        'info'
+      );
+    },
+    [
+      employees,
+      summaries,
+      attendanceRecords,
+      liveTelemetryMap,
+      todayStr,
+      showToast,
+    ]
+  );
+
+  const handleToggleSimAutoMove = useCallback(() => {
+    setSimState((prev) =>
+      prev.isActive ? { ...prev, isAutoMoving: !prev.isAutoMoving } : prev
+    );
+  }, []);
+
+  const handleSimStepOnce = useCallback(() => {
+    const now = Date.now();
+    setLiveClockMs(now);
+    setSimState((prev) => advanceSimulationGpsStep(prev, now));
+  }, []);
+
+  const handleStopSimulation = useCallback(() => {
+    activeEpisodesRef.current = new Map();
+    setSimAlertLogs([]);
+    setSimState(createInactiveSimulationState());
+    setLiveClockMs(Date.now());
+    showToast('تم إيقاف المحاكاة واستعادة القراءة المباشرة من قاعدة البيانات.', 'info');
+  }, [showToast]);
+
+  const handleSyncSimulationToCloud = useCallback(async () => {
+    if (!simState.isActive || simState.usesSyntheticFleet) {
+      showToast(
+        'لحفظ المحاكاة سحابياً يجب وجود مندوب نشط واحد على الأقل في قاعدة البيانات.',
+        'warning'
+      );
+      return;
+    }
+
+    const writableTargets = employees
+      .filter(
+        (emp) =>
+          emp.status === 'active' &&
+          Boolean(simState.telemetryMap[emp.id]) &&
+          canEditRepLiveTelemetry(currentUser, emp, securityPolicy)
+      )
+      .slice(0, 10);
+
+    if (writableTargets.length === 0) {
+      showToast('ليس لديك صلاحية كتابة مواقع المناديب في السحابة.', 'warning');
+      return;
+    }
+
+    setIsSyncingSimCloud(true);
+    try {
+      const now = Date.now();
+      await Promise.all(
+        writableTargets.map((emp) => {
+          const tel = simState.telemetryMap[emp.id]!;
+          return upsertRepLiveTelemetry({
+            actor: currentUser,
+            employee: emp,
+            batch: tel.batch,
+            walletBalance: tel.walletBalance,
+            isOnline: tel.isOnline,
+            gps: tel.hasGpsFix
+              ? {
+                  lat: tel.lat,
+                  lng: tel.lng,
+                  accuracy: tel.accuracy || 12,
+                  gpsUpdatedAtMs: tel.isOnline ? now : tel.gpsUpdatedAtMs || now,
+                }
+              : null,
+            recordAudit: false,
+          });
+        })
+      );
+      activeEpisodesRef.current = new Map();
+      setSimAlertLogs([]);
+      setSimState(createInactiveSimulationState());
+      setLiveClockMs(now);
+      showToast(
+        `تمت مزامنة مواقع ومحافظ ${writableTargets.length} مندوب فعلي إلى Cloud Firestore بنجاح.`
+      );
+    } catch {
+      showToast('تعذرت مزامنة بيانات المحاكاة إلى السحابة.', 'error');
+    } finally {
+      setIsSyncingSimCloud(false);
+    }
+  }, [simState, employees, currentUser, securityPolicy, showToast]);
+
+  const simulationController = useMemo<LiveSimulationController>(
+    () => ({
+      isActive: simState.isActive,
+      isAutoMoving: simState.isAutoMoving,
+      activeScenario: simState.activeScenario,
+      stepCount: simState.stepCount,
+      usesSyntheticFleet: simState.usesSyntheticFleet,
+      isSyncingCloud: isSyncingSimCloud,
+      canSyncCloud: canSyncSimulationToCloud && !simState.usesSyntheticFleet,
+      startOrApplyScenario: handleStartOrApplySimScenario,
+      toggleAutoMove: handleToggleSimAutoMove,
+      stepOnce: handleSimStepOnce,
+      syncSimulationToCloud: handleSyncSimulationToCloud,
+      stopSimulation: handleStopSimulation,
+    }),
+    [
+      simState.isActive,
+      simState.isAutoMoving,
+      simState.activeScenario,
+      simState.stepCount,
+      simState.usesSyntheticFleet,
+      isSyncingSimCloud,
+      canSyncSimulationToCloud,
+      handleStartOrApplySimScenario,
+      handleToggleSimAutoMove,
+      handleSimStepOnce,
+      handleSyncSimulationToCloud,
+      handleStopSimulation,
+    ]
+  );
+
+  // محرك المراقبة التلقائي لحلقات التنبيه الذكية (يطلق التنبيه مرة واحدة فقط لكل حالة قائمة وينهيها تلقائياً عند زوال الشرط)
+  useEffect(() => {
+    if (
+      (!isInitialCloudLoaded && !simState.isActive) ||
+      currentUser.role === 'delivery_rep'
+    ) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    const { nextEpisodes, newlyTriggered, resolvedEpisodes } =
+      reconcileAlertEpisodes({
+        previousEpisodes: activeEpisodesRef.current,
+        monitoredList: monitoredRepresentatives,
+        nowMs,
+      });
+
+    const canPersistAlertLogs =
+      !simState.isActive &&
+      (currentUser.role === 'super_admin' ||
+        (!securityPolicy.emergencyReadOnlyMode &&
+          !securityPolicy.systemLockdownMode &&
+          (currentUser.role === 'operations_manager' ||
+            currentUser.role === 'supervisor')));
+
+    if (newlyTriggered.length > 0) {
+      let highestSeverity: 'red' | 'orange' = 'orange';
+      let didNotifyAny = false;
+
+      for (const trig of newlyTriggered) {
+        if (trig.severity === 'red') highestSeverity = 'red';
+
+        const existingCloudLog = !simState.isActive
+          ? repAlertLogsRef.current.find(
+              (l) =>
+                l.status === 'active' &&
+                l.employeeId === trig.employeeId &&
+                l.alertType === trig.alertType
+            )
+          : undefined;
+
+        if (existingCloudLog) {
+          nextEpisodes.set(trig.episodeKey, {
+            ...trig,
+            alertId: existingCloudLog.alertId,
+            triggeredAtMs: existingCloudLog.triggeredAtMs,
+          });
+        } else {
+          didNotifyAny = true;
+          showToast(
+            `${trig.severity === 'red' ? 'تنبيه أحمر فوري' : 'تنبيه محفظة برتقالي'}: ${
+              trig.employeeName
+            } (${trig.employeeCode}) — ${trig.reason}`,
+            trig.severity === 'red' ? 'error' : 'warning'
+          );
+
+          if (simState.isActive) {
+            setSimAlertLogs((prev) => [
+              {
+                alertId: trig.alertId,
+                employeeId: trig.employeeId,
+                employeeCode: trig.employeeCode,
+                employeeName: trig.employeeName,
+                teamId: trig.teamId,
+                severity: trig.severity,
+                alertType: trig.alertType,
+                reason: `${trig.reason} [اختبار محاكاة]`,
+                batch: trig.batch,
+                walletBalance: trig.walletBalance,
+                performanceRate: trig.performanceRate,
+                status: 'active',
+                resolvedReason: '',
+                triggeredAtMs: trig.triggeredAtMs,
+                resolvedAtMs: 0,
+                recordedBy: currentUser.uid,
+              },
+              ...prev,
+            ]);
+          } else if (canPersistAlertLogs) {
+            void createRepSmartAlertLog({
+              actor: currentUser,
+              alertId: trig.alertId,
+              employeeId: trig.employeeId,
+              employeeCode: trig.employeeCode,
+              employeeName: trig.employeeName,
+              teamId: trig.teamId,
+              severity: trig.severity,
+              alertType: trig.alertType,
+              reason: trig.reason,
+              batch: trig.batch,
+              walletBalance: trig.walletBalance,
+              performanceRate: trig.performanceRate,
+              triggeredAtMs: trig.triggeredAtMs,
+            }).catch(() => {});
+          }
+        }
+      }
+
+      if (didNotifyAny && alertSoundEnabled) {
+        playSmartAlertSound(highestSeverity);
+      }
+    }
+
+    if (resolvedEpisodes.length > 0) {
+      if (simState.isActive) {
+        const resolvedIds = new Set(
+          resolvedEpisodes.map((r) => r.entry.alertId)
+        );
+        setSimAlertLogs((prev) =>
+          prev.map((log) =>
+            resolvedIds.has(log.alertId)
+              ? {
+                  ...log,
+                  status: 'resolved',
+                  resolvedReason:
+                    'زوال شرط التنبيه تلقائياً أثناء اختبار المحاكاة',
+                  resolvedAtMs: nowMs,
+                }
+              : log
+          )
+        );
+      } else {
+        for (const resolved of resolvedEpisodes) {
+          if (canPersistAlertLogs) {
+            void resolveRepSmartAlertLog({
+              actor: currentUser,
+              alertId: resolved.entry.alertId,
+              resolvedReason: 'زوال شرط التنبيه تلقائياً بعد تحديث البيانات',
+              walletBalance: resolved.currentWalletBalance,
+              performanceRate: resolved.currentPerformanceRate,
+              resolvedAtMs: nowMs,
+            }).catch(() => {});
+          }
+        }
+      }
+    }
+
+    activeEpisodesRef.current = nextEpisodes;
+  }, [
+    isInitialCloudLoaded,
+    simState.isActive,
+    monitoredRepresentatives,
+    currentUser,
+    securityPolicy.emergencyReadOnlyMode,
+    securityPolicy.systemLockdownMode,
+    alertSoundEnabled,
+    showToast,
+  ]);
 
   const filteredEmployees = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -1718,6 +2284,33 @@ function AuthenticatedWorkspace({
               )}
             </button>
 
+            {canAccessRoute(currentUser, 'live_monitoring', securityPolicy) && (
+              <button
+                type="button"
+                onClick={() => navigateToRoute('live_monitoring')}
+                className={`min-h-[40px] px-3 py-2 rounded-lg border text-xs font-extrabold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  activeRoute === 'live_monitoring'
+                    ? 'bg-rose-600 border-rose-500 text-white'
+                    : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-white'
+                }`}
+                title="لوحة المراقبة الحية للمناديب والتنبيهات الذكية (Live Map)"
+              >
+                <Radio
+                  className={`w-4 h-4 shrink-0 ${
+                    activeRoute === 'live_monitoring'
+                      ? 'text-white'
+                      : 'text-rose-400'
+                  }`}
+                />
+                <span className="hidden sm:inline">المراقبة الحية</span>
+                {activeLiveAlertsCount > 0 && (
+                  <span className="px-1.5 py-0.5 rounded bg-rose-500 text-white font-mono tabular-nums text-[10px] font-extrabold">
+                    {activeLiveAlertsCount}
+                  </span>
+                )}
+              </button>
+            )}
+
             <button
               type="button"
               onClick={handleGlobalBack}
@@ -2093,6 +2686,33 @@ function AuthenticatedWorkspace({
           onSendPasswordReset={requestPasswordReset}
           onLogout={logout}
           onNotify={showToast}
+          myLiveTelemetry={
+            currentUser.employeeId
+              ? liveTelemetryMap[currentUser.employeeId] || null
+              : null
+          }
+        />
+      ) : activeRoute === 'live_monitoring' ? (
+        <LiveMonitoringDashboard
+          currentUser={currentUser}
+          securityPolicy={securityPolicy}
+          monitoredReps={monitoredRepresentatives}
+          teams={teams}
+          alertLogs={effectiveRepAlertLogs}
+          todayStr={todayStr}
+          nowMs={liveClockMs}
+          soundEnabled={alertSoundEnabled}
+          onToggleSound={handleToggleAlertSound}
+          simulation={simulationController}
+          onInspectEmployeeInGrid={(emp) => {
+            setSearchQuery(emp.employeeCode);
+            applyNavigation({
+              route: 'monthly_grid',
+              viewTab: 'grid',
+              casePage: null,
+            });
+          }}
+          onNotify={showToast}
         />
       ) : activeRoute === 'analytics' ? (
         <AnalyticsPage
@@ -2165,6 +2785,12 @@ function AuthenticatedWorkspace({
           todayStr={todayStr}
           canCreateEmp={canCreateEmp}
           isMigratingLocal={isMigratingLocal}
+          monitoredReps={monitoredRepresentatives}
+          nowMs={liveClockMs}
+          soundEnabled={alertSoundEnabled}
+          onToggleSound={handleToggleAlertSound}
+          simulation={simulationController}
+          onNotify={showToast}
           onChangeMonth={(y, m) => {
             setCurrentYear(y);
             setCurrentMonth(m);
@@ -2997,6 +3623,7 @@ function AuthenticatedWorkspace({
         currentSnapshot={currentNavSnapshot}
         counts={{
           employeesCount: employees.length,
+          liveAlertsCount: activeLiveAlertsCount,
           pendingRequestsCount,
           usersCount: allUsers.length + invitations.filter((i) => i.status === 'pending').length,
           teamsCount: teams.length,
@@ -3070,17 +3697,52 @@ function AppGate() {
     );
   }
 
-  return (
+  const mapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+  const workspaceNode = (
     <AuthenticatedWorkspace
       isDarkMode={isDarkMode}
       setIsDarkMode={setIsDarkMode}
     />
   );
+
+  return mapsApiKey ? (
+    <APIProvider apiKey={mapsApiKey} language="ar" region="EG">
+      {workspaceNode}
+    </APIProvider>
+  ) : (
+    workspaceNode
+  );
 }
 
 export default function App() {
+  const [gmpQuotaExceeded, setGmpQuotaExceeded] = useState(false);
+
+  useEffect(() => {
+    const onQuotaExceeded = () => setGmpQuotaExceeded(true);
+    window.addEventListener('gmp-quota-exceeded', onQuotaExceeded);
+    return () => {
+      window.removeEventListener('gmp-quota-exceeded', onQuotaExceeded);
+    };
+  }, []);
+
   return (
     <FirestoreErrorBoundary>
+      {gmpQuotaExceeded && (
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
+          <span>
+            Google Maps Platform quota reached. If you are the app owner, visit{' '}
+            <a
+              href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-semibold text-amber-950 hover:text-amber-800"
+            >
+              maps developer site
+            </a>{' '}
+            for instructions to update your account.
+          </span>
+        </div>
+      )}
       <AuthProvider>
         <AppGate />
       </AuthProvider>

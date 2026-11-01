@@ -24,6 +24,9 @@ import {
   Employee,
   PermissionKey,
   PreprovisionedInvitation,
+  RepBatchId,
+  RepSmartAlertSeverity,
+  RepSmartAlertType,
   SecurityPolicySettings,
   Team,
   UserProfile,
@@ -1079,4 +1082,322 @@ export async function clearAllOperationalDataFirestore(params: {
     afterSummary: 'تم التفريغ بالكامل بواسطة مدير النظام',
   });
 }
+
+function clampLatitude(lat: number): number {
+  if (!Number.isFinite(lat)) return 0;
+  return Math.max(-90, Math.min(90, Number(lat.toFixed(6))));
+}
+
+function clampLongitude(lng: number): number {
+  if (!Number.isFinite(lng)) return 0;
+  return Math.max(-180, Math.min(180, Number(lng.toFixed(6))));
+}
+
+function clampWalletBalance(amount: number): number {
+  if (!Number.isFinite(amount)) return 0;
+  return Math.max(0, Math.min(10_000_000, Number(amount.toFixed(2))));
+}
+
+/**
+ * إنشاء أو تحديث بيانات المراقبة المباشرة للمندوب (الباتش، المحفظة، حالة الاتصال، وإحداثيات GPS)
+ * متوافق بدقة مع شروط Action 1 (Super Admin / Ops Manager) و Action 2 (Supervisor ضمن فريقه) في firestore.rules
+ */
+export async function upsertRepLiveTelemetry(params: {
+  actor: UserProfile;
+  employee: Employee;
+  batch: RepBatchId;
+  walletBalance: number;
+  isOnline: boolean;
+  gps?: {
+    lat: number;
+    lng: number;
+    accuracy?: number;
+    gpsUpdatedAtMs?: number;
+  } | null;
+  recordAudit?: boolean;
+}): Promise<void> {
+  const empId = sanitizeId(params.employee.id);
+  const path = `repLiveLocations/${empId}`;
+  const docRef = doc(db, 'repLiveLocations', empId);
+
+  try {
+    const snap = await getDoc(docRef);
+    const cleanWallet = clampWalletBalance(params.walletBalance);
+    const hasNewGps =
+      Boolean(params.gps) &&
+      Number.isFinite(params.gps?.lat) &&
+      Number.isFinite(params.gps?.lng);
+
+    if (snap.exists()) {
+      const existing = snap.data();
+      const nextHasGpsFix = hasNewGps ? true : Boolean(existing.hasGpsFix);
+      const nextLat = hasNewGps
+        ? clampLatitude(params.gps!.lat)
+        : clampLatitude(Number(existing.lat) || 0);
+      const nextLng = hasNewGps
+        ? clampLongitude(params.gps!.lng)
+        : clampLongitude(Number(existing.lng) || 0);
+      const nextAccuracy = hasNewGps
+        ? Math.max(0, Math.min(50_000, Math.round(params.gps!.accuracy ?? 15)))
+        : Math.max(0, Math.min(50_000, Math.round(Number(existing.accuracy) || 0)));
+      const nextGpsUpdatedAtMs = hasNewGps
+        ? Math.max(0, Math.round(params.gps!.gpsUpdatedAtMs ?? Date.now()))
+        : Math.max(0, Math.round(Number(existing.gpsUpdatedAtMs) || 0));
+
+      if (params.actor.role === 'supervisor') {
+        await updateDoc(docRef, {
+          batch: params.batch,
+          walletBalance: cleanWallet,
+          hasGpsFix: nextHasGpsFix,
+          lat: nextLat,
+          lng: nextLng,
+          accuracy: nextAccuracy,
+          isOnline: Boolean(params.isOnline),
+          gpsUpdatedAtMs: nextGpsUpdatedAtMs,
+          updatedBy: params.actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        await updateDoc(docRef, {
+          teamId: sanitizeId(params.employee.teamId || ''),
+          userId: sanitizeId(params.employee.userId || ''),
+          batch: params.batch,
+          walletBalance: cleanWallet,
+          hasGpsFix: nextHasGpsFix,
+          lat: nextLat,
+          lng: nextLng,
+          accuracy: nextAccuracy,
+          isOnline: Boolean(params.isOnline),
+          gpsUpdatedAtMs: nextGpsUpdatedAtMs,
+          updatedBy: params.actor.uid,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } else {
+      await setDoc(docRef, {
+        employeeId: empId,
+        teamId: sanitizeId(params.employee.teamId || ''),
+        userId: sanitizeId(params.employee.userId || ''),
+        batch: params.batch,
+        walletBalance: cleanWallet,
+        hasGpsFix: hasNewGps,
+        lat: hasNewGps ? clampLatitude(params.gps!.lat) : 0,
+        lng: hasNewGps ? clampLongitude(params.gps!.lng) : 0,
+        accuracy: hasNewGps
+          ? Math.max(0, Math.min(50_000, Math.round(params.gps!.accuracy ?? 15)))
+          : 0,
+        isOnline: Boolean(params.isOnline),
+        gpsUpdatedAtMs: hasNewGps
+          ? Math.max(0, Math.round(params.gps!.gpsUpdatedAtMs ?? Date.now()))
+          : 0,
+        updatedBy: params.actor.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    if (params.recordAudit !== false) {
+      await recordAuditLog({
+        actor: params.actor,
+        category: 'operational',
+        action: 'تحديث بيانات المحفظة والباتش والموقع الحي للمندوب',
+        targetType: 'rep_live_telemetry',
+        targetId: empId,
+        afterSummary: `المندوب: ${params.employee.fullName} | الباتش: ${params.batch} | المحفظة: ${cleanWallet} ج.م | متصل: ${params.isOnline ? 'نعم' : 'لا'}`,
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+/**
+ * بث الموقع المباشر (GPS) وحالة الاتصال للمندوب نفسه من بوابته الشخصية
+ * مع حماية كاملة لقيمة المحفظة والباتش من أي تعديل ذاتي وفق Action 3 في firestore.rules
+ */
+export async function broadcastOwnRepGpsLocation(params: {
+  actor: UserProfile;
+  employee: Employee;
+  lat: number;
+  lng: number;
+  accuracy?: number;
+}): Promise<void> {
+  const empId = sanitizeId(params.employee.id);
+  const path = `repLiveLocations/${empId}`;
+  const docRef = doc(db, 'repLiveLocations', empId);
+
+  try {
+    const snap = await getDoc(docRef);
+    const cleanLat = clampLatitude(params.lat);
+    const cleanLng = clampLongitude(params.lng);
+    const cleanAcc = Math.max(
+      0,
+      Math.min(50_000, Math.round(params.accuracy ?? 15))
+    );
+    const nowMs = Date.now();
+
+    if (snap.exists()) {
+      await updateDoc(docRef, {
+        hasGpsFix: true,
+        lat: cleanLat,
+        lng: cleanLng,
+        accuracy: cleanAcc,
+        isOnline: true,
+        gpsUpdatedAtMs: nowMs,
+        updatedBy: params.actor.uid,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(docRef, {
+        employeeId: empId,
+        teamId: sanitizeId(params.employee.teamId || ''),
+        userId: params.actor.uid,
+        batch: 'Batch 1',
+        walletBalance: 0,
+        hasGpsFix: true,
+        lat: cleanLat,
+        lng: cleanLng,
+        accuracy: cleanAcc,
+        isOnline: true,
+        gpsUpdatedAtMs: nowMs,
+        updatedBy: params.actor.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+/**
+ * إيقاف البث المباشر لموقع المندوب وتحديث حالته إلى غير متصل مع الاحتفاظ بآخر موقع معروف وتوقيته
+ */
+export async function stopOwnRepGpsBroadcast(params: {
+  actor: UserProfile;
+  employee: Employee;
+}): Promise<void> {
+  const empId = sanitizeId(params.employee.id);
+  const path = `repLiveLocations/${empId}`;
+  const docRef = doc(db, 'repLiveLocations', empId);
+
+  try {
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) return;
+    await updateDoc(docRef, {
+      isOnline: false,
+      updatedBy: params.actor.uid,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+/**
+ * تسجيل حلقة تنبيه ذكي جديدة (أحمر أو برتقالي) في السجل التاريخي للتنبيهات (/repAlertLogs)
+ */
+export async function createRepSmartAlertLog(params: {
+  actor: UserProfile;
+  alertId: string;
+  employeeId: string;
+  employeeCode: string;
+  employeeName: string;
+  teamId: string;
+  severity: RepSmartAlertSeverity;
+  alertType: RepSmartAlertType;
+  reason: string;
+  batch: RepBatchId;
+  walletBalance: number;
+  performanceRate: number;
+  triggeredAtMs: number;
+}): Promise<void> {
+  const cleanAlertId = sanitizeId(params.alertId);
+  const path = `repAlertLogs/${cleanAlertId}`;
+  const docRef = doc(db, 'repAlertLogs', cleanAlertId);
+
+  try {
+    const snap = await getDoc(docRef);
+    if (snap.exists()) return;
+
+    await setDoc(docRef, {
+      alertId: cleanAlertId,
+      employeeId: sanitizeId(params.employeeId),
+      employeeCode: (params.employeeCode || params.employeeId).slice(0, 64),
+      employeeName: (params.employeeName || 'مندوب').slice(0, 120),
+      teamId: sanitizeId(params.teamId || ''),
+      severity: params.severity,
+      alertType: params.alertType,
+      reason: (params.reason || 'تنبيه تشغيلي').slice(0, 300),
+      batch: params.batch,
+      walletBalance: clampWalletBalance(params.walletBalance),
+      performanceRate: Math.max(
+        -1,
+        Math.min(
+          100,
+          Number.isFinite(params.performanceRate)
+            ? Number(params.performanceRate.toFixed(1))
+            : -1
+        )
+      ),
+      status: 'active',
+      resolvedReason: '',
+      triggeredAtMs: Math.max(0, Math.round(params.triggeredAtMs || Date.now())),
+      resolvedAtMs: 0,
+      recordedBy: params.actor.uid,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+/**
+ * إغلاق التنبيه الذكي تلقائياً في السجل التاريخي فور زوال شرط التنبيه (Terminal State Transition)
+ */
+export async function resolveRepSmartAlertLog(params: {
+  actor: UserProfile;
+  alertId: string;
+  resolvedReason: string;
+  walletBalance: number;
+  performanceRate: number;
+  resolvedAtMs?: number;
+}): Promise<void> {
+  const cleanAlertId = sanitizeId(params.alertId);
+  const path = `repAlertLogs/${cleanAlertId}`;
+  const docRef = doc(db, 'repAlertLogs', cleanAlertId);
+
+  try {
+    const snap = await getDoc(docRef);
+    if (!snap.exists() || snap.data().status === 'resolved') return;
+
+    await updateDoc(docRef, {
+      status: 'resolved',
+      resolvedReason: (params.resolvedReason || 'زوال سبب التنبيه تلقائياً').slice(
+        0,
+        200
+      ),
+      resolvedAtMs: Math.max(
+        1,
+        Math.round(params.resolvedAtMs ?? Date.now())
+      ),
+      walletBalance: clampWalletBalance(params.walletBalance),
+      performanceRate: Math.max(
+        -1,
+        Math.min(
+          100,
+          Number.isFinite(params.performanceRate)
+            ? Number(params.performanceRate.toFixed(1))
+            : -1
+        )
+      ),
+      recordedBy: params.actor.uid,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
 

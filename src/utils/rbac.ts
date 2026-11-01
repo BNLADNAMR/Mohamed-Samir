@@ -343,6 +343,29 @@ export function canRecordOrEditAttendance(
   return false;
 }
 
+export function canEditRepLiveTelemetry(
+  user: UserProfile | null,
+  emp: Employee,
+  policy: SecurityPolicySettings = DEFAULT_SECURITY_POLICY
+): boolean {
+  if (!user || user.status !== 'active') return false;
+  if (user.role === 'super_admin') return true;
+  if (policy.systemLockdownMode || policy.emergencyReadOnlyMode) return false;
+  if (user.role === 'operations_manager') {
+    return (
+      hasPermission(user, 'employees.edit', policy) ||
+      hasPermission(user, 'attendance.record', policy)
+    );
+  }
+  if (user.role === 'supervisor') {
+    return (
+      Boolean(user.teamId && emp.teamId === user.teamId) &&
+      hasPermission(user, 'attendance.record', policy)
+    );
+  }
+  return false;
+}
+
 export function canReviewOrApproveRequest(
   user: UserProfile | null,
   req: WorkflowRequest,
@@ -395,11 +418,14 @@ export function canAccessRoute(
     case 'my_portal':
       return user.role === 'delivery_rep' || hasPermission(user, 'employees.view_self', policy);
     case 'dashboard':
+    case 'live_monitoring':
     case 'monthly_grid':
       return (
         user.role !== 'delivery_rep' &&
         (hasPermission(user, 'shifts.view_all', policy) ||
-          hasPermission(user, 'shifts.view_team', policy))
+          hasPermission(user, 'shifts.view_team', policy) ||
+          hasPermission(user, 'employees.view_all', policy) ||
+          hasPermission(user, 'employees.view_team', policy))
       );
     case 'analytics':
       return (

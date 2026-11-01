@@ -26,6 +26,7 @@ export type DrawerSectionGroupId =
 
 export type DrawerIconKey =
   | 'home_overview'
+  | 'live_map'
   | 'calendar_grid'
   | 'analytics'
   | 'my_portal'
@@ -77,6 +78,7 @@ export interface DrawerSectionGroup {
 
 export interface DrawerCountsInput {
   employeesCount: number;
+  liveAlertsCount?: number;
   pendingRequestsCount: number;
   usersCount: number;
   teamsCount: number;
@@ -114,6 +116,27 @@ export function buildDrawerSectionGroups(params: {
         viewTab: 'grid',
         casePage: null,
       },
+    });
+  }
+
+  if (canAccessRoute(user, 'live_monitoring', policy)) {
+    const activeAlerts = counts.liveAlertsCount ?? 0;
+    operationsItems.push({
+      id: 'nav_live_monitoring',
+      groupId: 'operations',
+      titleAr: 'المراقبة الحية للمناديب والتنبيهات الذكية (Live Map)',
+      subtitleAr:
+        'خريطة GPS مباشرة للمواقع والمحافظ والباتشات وترتيب الأولوية والتنبيهات',
+      iconKey: 'live_map',
+      kind: 'navigation',
+      targetSnapshot: {
+        route: 'live_monitoring',
+        viewTab: 'grid',
+        casePage: null,
+      },
+      count: activeAlerts > 0 ? activeAlerts : counts.employeesCount,
+      alertLabelAr: activeAlerts > 0 ? 'تنبيه نشط' : undefined,
+      tone: activeAlerts > 0 ? 'warning' : 'default',
     });
   }
 

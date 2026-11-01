@@ -53,6 +53,7 @@ export type PermissionKey =
 
 export type AppRoutePage =
   | 'dashboard'
+  | 'live_monitoring'
   | 'monthly_grid'
   | 'analytics'
   | 'my_portal'
@@ -273,3 +274,81 @@ export interface ToastNotification {
   message: string;
   type: 'success' | 'info' | 'warning' | 'error';
 }
+
+export type RepBatchId =
+  | 'Batch 1'
+  | 'Batch 2'
+  | 'Batch 3'
+  | 'Batch 4'
+  | 'Batch 5'
+  | 'Batch 6';
+
+export type RepSmartAlertSeverity = 'red' | 'orange';
+
+export type RepSmartAlertType =
+  | 'performance_red'
+  | 'wallet_batch_456'
+  | 'wallet_batch_123';
+
+export type RepConnectionState = 'online' | 'stale' | 'offline';
+
+export interface RepLiveTelemetry {
+  employeeId: string;
+  teamId: string;
+  userId: string;
+  batch: RepBatchId;
+  walletBalance: number;
+  hasGpsFix: boolean;
+  lat: number;
+  lng: number;
+  accuracy: number;
+  isOnline: boolean;
+  gpsUpdatedAtMs: number;
+  updatedBy: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ActiveRepAlert {
+  episodeKey: string;
+  employeeId: string;
+  severity: RepSmartAlertSeverity;
+  alertType: RepSmartAlertType;
+  titleAr: string;
+  reason: string;
+}
+
+export interface RepAlertLogRecord {
+  alertId: string;
+  employeeId: string;
+  employeeCode: string;
+  employeeName: string;
+  teamId: string;
+  severity: RepSmartAlertSeverity;
+  alertType: RepSmartAlertType;
+  reason: string;
+  batch: RepBatchId;
+  walletBalance: number;
+  performanceRate: number;
+  status: 'active' | 'resolved';
+  resolvedReason: string;
+  triggeredAtMs: number;
+  resolvedAtMs: number;
+  recordedBy: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface MonitoredRepresentative {
+  employee: Employee;
+  summary: EmployeeSummary;
+  todayRecord?: AttendanceRecord;
+  telemetry: RepLiveTelemetry;
+  connectionState: RepConnectionState;
+  statusLabelAr: string;
+  gpsAgeMs: number | null;
+  alerts: ActiveRepAlert[];
+  primarySeverity: 'red' | 'orange' | 'none';
+  markerTone: 'red' | 'orange' | 'green' | 'offline';
+}
+

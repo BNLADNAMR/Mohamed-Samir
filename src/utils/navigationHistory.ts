@@ -13,6 +13,7 @@ export interface NavigationSnapshot {
 
 const ROUTE_LABELS_AR: Record<AppRoutePage, string> = {
   dashboard: 'الصفحة الرئيسية · ملخص البيانات',
+  live_monitoring: 'المراقبة الحية للمناديب والتنبيهات الذكية',
   monthly_grid: 'الجدول الشهري للشفتات',
   analytics: 'ملخص الأداء والتقارير',
   my_portal: 'بوابتي الشخصية',
