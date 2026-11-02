@@ -418,14 +418,28 @@ export function canAccessRoute(
     case 'my_portal':
       return user.role === 'delivery_rep' || hasPermission(user, 'employees.view_self', policy);
     case 'dashboard':
+      return (
+        user.role !== 'delivery_rep' &&
+        (hasPermission(user, 'shifts.view_all', policy) ||
+          hasPermission(user, 'shifts.view_team', policy) ||
+          hasPermission(user, 'attendance.view_all', policy) ||
+          hasPermission(user, 'attendance.view_team', policy) ||
+          hasPermission(user, 'employees.view_all', policy) ||
+          hasPermission(user, 'employees.view_team', policy))
+      );
     case 'live_monitoring':
+      return (
+        user.role !== 'delivery_rep' &&
+        (hasPermission(user, 'employees.view_all', policy) ||
+          hasPermission(user, 'employees.view_team', policy))
+      );
     case 'monthly_grid':
       return (
         user.role !== 'delivery_rep' &&
         (hasPermission(user, 'shifts.view_all', policy) ||
           hasPermission(user, 'shifts.view_team', policy) ||
-          hasPermission(user, 'employees.view_all', policy) ||
-          hasPermission(user, 'employees.view_team', policy))
+          hasPermission(user, 'attendance.view_all', policy) ||
+          hasPermission(user, 'attendance.view_team', policy))
       );
     case 'analytics':
       return (
@@ -433,24 +447,25 @@ export function canAccessRoute(
         (hasPermission(user, 'reports.view_all', policy) ||
           hasPermission(user, 'reports.view_team', policy))
       );
-    case 'requests':
+    case 'requests': {
+      if (user.role === 'super_admin') return true;
+      const basePolicy = policy.emergencyReadOnlyMode
+        ? { ...policy, emergencyReadOnlyMode: false }
+        : policy;
       return (
-        user.role === 'super_admin' ||
-        hasPermission(user, 'leave.request', policy) ||
-        hasPermission(user, 'leave.review', policy) ||
-        hasPermission(user, 'leave.approve', policy) ||
-        user.role === 'delivery_rep' ||
-        user.role === 'supervisor' ||
-        user.role === 'operations_manager'
+        hasPermission(user, 'leave.request', basePolicy) ||
+        hasPermission(user, 'leave.review', basePolicy) ||
+        hasPermission(user, 'leave.approve', basePolicy)
       );
+    }
     case 'users':
       return user.role === 'super_admin' || hasPermission(user, 'users.view', policy);
     case 'teams':
       return (
         user.role === 'super_admin' ||
-        user.role === 'operations_manager' ||
-        user.role === 'supervisor' ||
-        hasPermission(user, 'teams.manage', policy)
+        hasPermission(user, 'teams.manage', policy) ||
+        (user.role === 'operations_manager' && hasPermission(user, 'employees.view_all', policy)) ||
+        (user.role === 'supervisor' && hasPermission(user, 'employees.view_team', policy))
       );
     case 'audit_logs':
       return user.role === 'super_admin' || hasPermission(user, 'audit.view', policy);
@@ -459,7 +474,31 @@ export function canAccessRoute(
   }
 }
 
-export function getDefaultRouteForRole(role: UserRole): AppRoutePage {
-  if (role === 'delivery_rep') return 'my_portal';
-  return 'dashboard';
+export function getDefaultRouteForRole(
+  role: UserRole,
+  user?: UserProfile | null,
+  policy: SecurityPolicySettings = DEFAULT_SECURITY_POLICY
+): AppRoutePage {
+  const preferred: AppRoutePage = role === 'delivery_rep' ? 'my_portal' : 'dashboard';
+  if (!user) return preferred;
+  if (canAccessRoute(user, preferred, policy)) return preferred;
+
+  const fallbackOrder: AppRoutePage[] = [
+    'my_portal',
+    'dashboard',
+    'live_monitoring',
+    'monthly_grid',
+    'analytics',
+    'requests',
+    'teams',
+    'users',
+    'audit_logs',
+    'profile',
+  ];
+  for (const candidate of fallbackOrder) {
+    if (canAccessRoute(user, candidate, policy)) {
+      return candidate;
+    }
+  }
+  return 'profile';
 }

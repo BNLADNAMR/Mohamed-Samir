@@ -58,7 +58,8 @@ import {
   computeEmployeeSummary,
   getDaysInMonth,
 } from '../utils/shiftCalculations';
-import { canAccessRoute } from '../utils/rbac';
+import { canAccessRoute, hasPermission } from '../utils/rbac';
+import { buildRoleWorkspaceConfig } from '../utils/roleWorkspaces';
 import {
   LiveAlertFilterMode,
   filterMonitoredRepresentatives,
@@ -1222,47 +1223,95 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
           onSecondaryAction: () => openCasePage('selected_not_worked'),
         }),
     },
-    {
-      id: 'kpi_requests_approval',
-      title: 'معدل إنجاز الطلبات',
-      icon: <FileCheck2 className="w-4 h-4 text-violet-600 dark:text-violet-300" />,
-      value: `${Math.round(metrics.requestsResolutionRate)}%`,
-      unit: `${metrics.pendingReqs} معلق`,
-      delta: metrics.pendingReqs === 0 ? 4.2 : -metrics.pendingReqs,
-      ringPct: metrics.requestsResolutionRate,
-      onClick: () =>
-        setDrillDown({
-          id: 'drill_requests',
-          titleAr: 'تفاصيل طلبات الإجازات وتصحيح الحضور',
-          subtitleAr: `ملخص حالة الطلبات خلال ${activeScopeLabel}`,
-          headlineValue: `${metrics.totalReqs}`,
-          headlineUnit: 'إجمالي الطلبات',
-          deltaText:
-            metrics.pendingReqs > 0
-              ? `يوجد ${metrics.pendingReqs} طلب بانتظار المراجعة والاعتماد`
-              : 'جميع الطلبات تمت مراجعتها بالكامل',
-          deltaPositive: metrics.pendingReqs === 0,
-          summaryPoints: [
-            { label: 'طلبات بانتظار الاعتماد', value: `${metrics.pendingReqs}`, tone: 'amber' },
-            {
-              label: 'طلبات معتمدة',
-              value: `${metrics.scopedRequests.filter((r) => r.status === 'approved').length}`,
-              tone: 'emerald',
-            },
-            {
-              label: 'طلبات مرفوضة',
-              value: `${metrics.scopedRequests.filter((r) => r.status === 'rejected').length}`,
-              tone: 'rose',
-            },
-            { label: 'نسبة الإنجاز', value: `${metrics.requestsResolutionRate}%`, tone: 'violet' },
-          ],
-          primaryActionLabel: 'الانتقال إلى صفحة الطلبات والإجازات',
-          onPrimaryAction: () => {
-            setDrillDown(null);
-            onNavigateSnapshot({ route: 'requests', viewTab: 'grid', casePage: null });
-          },
-        }),
-    },
+    canAccessRoute(currentUser, 'requests', securityPolicy)
+      ? {
+          id: 'kpi_requests_approval',
+          title:
+            currentUser.role === 'supervisor'
+              ? 'طلبات وتوصيات فريقي'
+              : 'معدل إنجاز الطلبات',
+          icon: <FileCheck2 className="w-4 h-4 text-violet-600 dark:text-violet-300" />,
+          value: `${Math.round(metrics.requestsResolutionRate)}%`,
+          unit: `${metrics.pendingReqs} معلق`,
+          delta: metrics.pendingReqs === 0 ? 4.2 : -metrics.pendingReqs,
+          ringPct: metrics.requestsResolutionRate,
+          onClick: () =>
+            setDrillDown({
+              id: 'drill_requests',
+              titleAr: 'تفاصيل طلبات الإجازات وتصحيح الحضور',
+              subtitleAr: `ملخص حالة الطلبات خلال ${activeScopeLabel}`,
+              headlineValue: `${metrics.totalReqs}`,
+              headlineUnit: 'إجمالي الطلبات',
+              deltaText:
+                metrics.pendingReqs > 0
+                  ? `يوجد ${metrics.pendingReqs} طلب بانتظار المراجعة والاعتماد`
+                  : 'جميع الطلبات تمت مراجعتها بالكامل',
+              deltaPositive: metrics.pendingReqs === 0,
+              summaryPoints: [
+                { label: 'طلبات بانتظار الاعتماد', value: `${metrics.pendingReqs}`, tone: 'amber' },
+                {
+                  label: 'طلبات معتمدة',
+                  value: `${metrics.scopedRequests.filter((r) => r.status === 'approved').length}`,
+                  tone: 'emerald',
+                },
+                {
+                  label: 'طلبات مرفوضة',
+                  value: `${metrics.scopedRequests.filter((r) => r.status === 'rejected').length}`,
+                  tone: 'rose',
+                },
+                { label: 'نسبة الإنجاز', value: `${metrics.requestsResolutionRate}%`, tone: 'violet' },
+              ],
+              primaryActionLabel: 'الانتقال إلى صفحة الطلبات والإجازات',
+              onPrimaryAction: () => {
+                setDrillDown(null);
+                onNavigateSnapshot({ route: 'requests', viewTab: 'grid', casePage: null });
+              },
+            }),
+        }
+      : {
+          id: 'kpi_avg_daily_hours',
+          title: 'متوسط ساعات الشفت الفعلي',
+          icon: <BarChart3 className="w-4 h-4 text-violet-600 dark:text-violet-300" />,
+          value: `${
+            metrics.workedDays > 0
+              ? Number((metrics.totalHours / metrics.workedDays).toFixed(1))
+              : 0
+          }`,
+          unit: 'ساعة / شفت',
+          delta: metrics.hoursDelta,
+          ringPct: Math.min(
+            100,
+            Math.round(
+              ((metrics.workedDays > 0
+                ? metrics.totalHours / metrics.workedDays
+                : 0) /
+                8) *
+                100
+            )
+          ),
+          onClick: () =>
+            setDrillDown({
+              id: 'drill_avg_hours',
+              titleAr: 'تفاصيل متوسط ساعات الشفت اليومي',
+              subtitleAr: `ملخص ساعات العمل المحققة خلال ${activeScopeLabel}`,
+              headlineValue: `${
+                metrics.workedDays > 0
+                  ? Number((metrics.totalHours / metrics.workedDays).toFixed(1))
+                  : 0
+              }`,
+              headlineUnit: 'ساعة عمل لكل شفت منفذ',
+              deltaText: `إجمالي الساعات: ${metrics.totalHours} ساعة خلال ${metrics.workedDays} يوم عمل`,
+              deltaPositive: true,
+              summaryPoints: [
+                { label: 'إجمالي الساعات الصافية', value: `${metrics.totalHours} ساعة`, tone: 'violet' },
+                { label: 'أيام الحضور الفعلي', value: `${metrics.workedDays} يوم`, tone: 'emerald' },
+                { label: 'المستهدف الشهري', value: `${metrics.targetMonthlyHours} ساعة`, tone: 'amber' },
+                { label: 'نسبة تحقيق المستهدف', value: `${metrics.hoursTargetRatio}%`, tone: 'emerald' },
+              ],
+              primaryActionLabel: 'فتح صفحة الحاضرين وساعات العمل',
+              onPrimaryAction: () => openCasePage('worked_only'),
+            }),
+        },
     {
       id: 'kpi_commitment',
       title: 'معدل التزام القوة العاملة',
@@ -1271,7 +1320,8 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
       unit: 'انضباط',
       delta: metrics.commitmentDelta,
       ringPct: metrics.commitmentRate,
-      onClick: () =>
+      onClick: () => {
+        const canGoAnalytics = canAccessRoute(currentUser, 'analytics', securityPolicy);
         setDrillDown({
           id: 'drill_commitment',
           titleAr: 'تفاصيل مؤشر الالتزام والأداء',
@@ -1298,64 +1348,132 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
               metricValue: `${effectiveSummaries[emp.id]?.commitmentRate ?? 0}%`,
               subText: `${effectiveSummaries[emp.id]?.workedDays ?? 0} يوم عمل`,
             })),
-          primaryActionLabel: 'فتح صفحة ملخص الأداء والتقارير المستقلة',
+          primaryActionLabel: canGoAnalytics
+            ? 'فتح صفحة ملخص الأداء والتقارير المستقلة'
+            : 'عرض جميع حالات الشفتات',
           onPrimaryAction: () => {
             setDrillDown(null);
-            onNavigateSnapshot({ route: 'analytics', viewTab: 'grid', casePage: null });
-          },
-        }),
-    },
-    {
-      id: 'kpi_digital_sync',
-      title: 'الربط الرقمي والحسابات',
-      icon: <Globe className="w-4 h-4 text-violet-600 dark:text-violet-300" />,
-      value: `${Math.round(metrics.digitalAdoptionRate)}%`,
-      unit: `${metrics.linkedDigitalCount} مربوط`,
-      delta: 3.3,
-      ringPct: metrics.digitalAdoptionRate,
-      onClick: () => {
-        const canGoUsers = canAccessRoute(currentUser, 'users', securityPolicy);
-        const isSuperAdmin = currentUser.role === 'super_admin';
-        setDrillDown({
-          id: 'drill_digital_adoption',
-          titleAr: 'تفاصيل التفعيل الرقمي وربط المعرفات',
-          subtitleAr: 'المندوبون المربوطون بحسابات دخول أو معرفات خارجية (External ID)',
-          headlineValue: `${metrics.linkedDigitalCount}`,
-          headlineUnit: `من أصل ${metrics.totalEmployees} مندوب`,
-          deltaText: `نسبة التغطية الرقمية: ${metrics.digitalAdoptionRate}%`,
-          deltaPositive: metrics.digitalAdoptionRate >= 50,
-          summaryPoints: [
-            { label: 'مندوبون بمعرف خارجي أو حساب', value: `${metrics.linkedDigitalCount}`, tone: 'violet' },
-            {
-              label: 'غير مربوطين بعد',
-              value: `${Math.max(0, metrics.totalEmployees - metrics.linkedDigitalCount)}`,
-              tone: 'amber',
-            },
-            { label: 'حالة آخر مزامنة خارجية', value: securityPolicy.lastExternalSyncStatus || 'جاهز', tone: 'emerald' },
-          ],
-          primaryActionLabel: canGoUsers
-            ? 'الانتقال إلى صفحة إدارة الحسابات والمستخدمين'
-            : 'فتح الجدول الشهري للمندوبين',
-          onPrimaryAction: () => {
-            setDrillDown(null);
-            if (canGoUsers) {
-              if (isSuperAdmin) {
-                onNavigateSnapshot({
-                  route: 'security_center',
-                  viewTab: 'grid',
-                  casePage: null,
-                  securityTab: 'users',
-                });
-              } else {
-                onNavigateSnapshot({ route: 'users', viewTab: 'grid', casePage: null });
-              }
+            if (canGoAnalytics) {
+              onNavigateSnapshot({ route: 'analytics', viewTab: 'grid', casePage: null });
             } else {
-              onOpenMonthlyGridWithFilter({});
+              openCasePage('all_shifts');
             }
           },
         });
       },
     },
+    hasPermission(currentUser, 'users.view', securityPolicy) ||
+    hasPermission(currentUser, 'integration.manage', securityPolicy)
+      ? {
+          id: 'kpi_digital_sync',
+          title: 'الربط الرقمي والحسابات',
+          icon: <Globe className="w-4 h-4 text-violet-600 dark:text-violet-300" />,
+          value: `${Math.round(metrics.digitalAdoptionRate)}%`,
+          unit: `${metrics.linkedDigitalCount} مربوط`,
+          delta: 3.3,
+          ringPct: metrics.digitalAdoptionRate,
+          onClick: () => {
+            const canGoUsers = canAccessRoute(currentUser, 'users', securityPolicy);
+            const isSuperAdmin = currentUser.role === 'super_admin';
+            setDrillDown({
+              id: 'drill_digital_adoption',
+              titleAr: 'تفاصيل التفعيل الرقمي وربط المعرفات',
+              subtitleAr: 'المندوبون المربوطون بحسابات دخول أو معرفات خارجية (External ID)',
+              headlineValue: `${metrics.linkedDigitalCount}`,
+              headlineUnit: `من أصل ${metrics.totalEmployees} مندوب`,
+              deltaText: `نسبة التغطية الرقمية: ${metrics.digitalAdoptionRate}%`,
+              deltaPositive: metrics.digitalAdoptionRate >= 50,
+              summaryPoints: [
+                { label: 'مندوبون بمعرف خارجي أو حساب', value: `${metrics.linkedDigitalCount}`, tone: 'violet' },
+                {
+                  label: 'غير مربوطين بعد',
+                  value: `${Math.max(0, metrics.totalEmployees - metrics.linkedDigitalCount)}`,
+                  tone: 'amber',
+                },
+                { label: 'حالة آخر مزامنة خارجية', value: securityPolicy.lastExternalSyncStatus || 'جاهز', tone: 'emerald' },
+              ],
+              primaryActionLabel: canGoUsers
+                ? 'الانتقال إلى صفحة إدارة الحسابات والمستخدمين'
+                : 'فتح الجدول الشهري للمندوبين',
+              onPrimaryAction: () => {
+                setDrillDown(null);
+                if (canGoUsers) {
+                  if (isSuperAdmin) {
+                    onNavigateSnapshot({
+                      route: 'security_center',
+                      viewTab: 'grid',
+                      casePage: null,
+                      securityTab: 'users',
+                    });
+                  } else {
+                    onNavigateSnapshot({ route: 'users', viewTab: 'grid', casePage: null });
+                  }
+                } else {
+                  onOpenMonthlyGridWithFilter({});
+                }
+              },
+            });
+          },
+        }
+      : {
+          id: 'kpi_fleet_readiness',
+          title:
+            currentUser.role === 'supervisor'
+              ? 'جاهزية مندوبي فريقي'
+              : 'نسبة المندوبين الجاهزين للعمل',
+          icon: <Radio className="w-4 h-4 text-violet-600 dark:text-violet-300" />,
+          value: `${
+            metrics.totalEmployees > 0
+              ? Math.round((metrics.activeCount / metrics.totalEmployees) * 100)
+              : 0
+          }%`,
+          unit: `${metrics.activeCount} نشط`,
+          delta: 2.4,
+          ringPct:
+            metrics.totalEmployees > 0
+              ? Number(((metrics.activeCount / metrics.totalEmployees) * 100).toFixed(1))
+              : 0,
+          onClick: () => {
+            const canGoLiveMap = canAccessRoute(
+              currentUser,
+              'live_monitoring',
+              securityPolicy
+            );
+            setDrillDown({
+              id: 'drill_fleet_readiness',
+              titleAr: 'تفاصيل جاهزية القوة العاملة النشطة',
+              subtitleAr: `توزيع حالة المندوبين المسجلين ضمن النطاق الحالي (${metrics.totalEmployees} مندوب)`,
+              headlineValue: `${metrics.activeCount}`,
+              headlineUnit: `مندوب نشط من أصل ${metrics.totalEmployees}`,
+              deltaText: `نسبة الجاهزية الميدانية: ${
+                metrics.totalEmployees > 0
+                  ? Math.round((metrics.activeCount / metrics.totalEmployees) * 100)
+                  : 0
+              }%`,
+              deltaPositive: metrics.activeCount > 0,
+              summaryPoints: [
+                { label: 'مندوبون بحالة نشط', value: `${metrics.activeCount}`, tone: 'emerald' },
+                {
+                  label: 'موقوفون مؤقتاً',
+                  value: `${Math.max(0, metrics.totalEmployees - metrics.activeCount)}`,
+                  tone: 'amber',
+                },
+                { label: 'أيام حضور مسجلة', value: `${metrics.workedDays} يوم`, tone: 'violet' },
+              ],
+              primaryActionLabel: canGoLiveMap
+                ? 'فتح الخريطة المباشرة للمناديب'
+                : 'عرض كل حالات الشفتات',
+              onPrimaryAction: () => {
+                setDrillDown(null);
+                if (canGoLiveMap) {
+                  onNavigateSnapshot({ route: 'live_monitoring' });
+                } else {
+                  openCasePage('all_shifts');
+                }
+              },
+            });
+          },
+        },
   ];
 
   // بيانات الخريطة المباشرة للمناديب وترتيب الأولوية وملخص التفاصيل الفوري داخل البطاقة
@@ -1499,6 +1617,20 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
     });
   };
 
+  const roleWorkspace = useMemo(
+    () =>
+      buildRoleWorkspaceConfig(currentUser, securityPolicy, {
+        teamName: teams.find((t) => t.teamId === currentUser.teamId)?.teamName,
+      }),
+    [currentUser, securityPolicy, teams]
+  );
+  const canUseSimulationLab = roleWorkspace.capabilities.canUseSimulationLab;
+  const canOpenMonthlyGrid = canAccessRoute(
+    currentUser,
+    'monthly_grid',
+    securityPolicy
+  );
+
   const mapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
   const maxBucketHours = Math.max(...eightBuckets.map((b) => b.hours), 10);
 
@@ -1506,30 +1638,32 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
     <main className="flex-1 bg-slate-100 dark:bg-[#070B19] text-slate-900 dark:text-slate-100 px-4 sm:px-6 py-5 transition-colors duration-150">
       <div className="max-w-[1860px] mx-auto space-y-5">
         {/* ===================================================================== */}
-        {/* 1. الشريط العلوي للرئيسية (العنوان + مبدل الأيام والأشهر والسنوات)    */}
+        {/* 1. الشريط العلوي للرئيسية المخصص للدور + مبدل الأيام والأشهر والسنوات */}
         {/* ===================================================================== */}
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white">
-              نظرة عامة على الأداء التشغيلي والشفتات
+              {roleWorkspace.overviewPageTitleAr}
             </h1>
             <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-0.5">
               {activeMonthDay
-                ? `عرض بيانات يوم ${activeScopeLabel} — تنقل بحرية بين الأيام أو اضغط على أي مؤشر للتفاصيل`
-                : `ملخص ساعات العمل، التزام المندوبين، وتوزيع الفرق (${activeScopeLabel}) — اضغط على أي مؤشر للتفاصيل`}
+                ? `عرض بيانات يوم ${activeScopeLabel} — ${roleWorkspace.overviewPageSubtitleAr}`
+                : `${roleWorkspace.overviewPageSubtitleAr} (${activeScopeLabel})`}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
             {/* الوصول المباشر للجدول التفصيلي الكامل */}
-            <button
-              type="button"
-              onClick={() => onOpenMonthlyGridWithFilter({})}
-              className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-extrabold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-            >
-              <Layers className="w-3.5 h-3.5" />
-              <span>الجدول الشهري التفصيلي</span>
-            </button>
+            {canOpenMonthlyGrid && (
+              <button
+                type="button"
+                onClick={() => onOpenMonthlyGridWithFilter({})}
+                className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-extrabold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>الجدول الشهري التفصيلي</span>
+              </button>
+            )}
 
             {/* مبدل الأيام والأشهر المرن (يتيح التنقل الحر يومياً أو اختيار أي يوم من التقويم أو عرض الشهر كاملاً) */}
             <div
@@ -2096,12 +2230,19 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
                             100
                         )
                       ),
-                      onSubClick: () =>
-                        onNavigateSnapshot({
-                          route: 'requests',
-                          viewTab: 'grid',
-                          casePage: null,
-                        }),
+                      onSubClick: () => {
+                        if (canAccessRoute(currentUser, 'requests', securityPolicy)) {
+                          onNavigateSnapshot({
+                            route: 'requests',
+                            viewTab: 'grid',
+                            casePage: null,
+                          });
+                        } else if (canOpenMonthlyGrid) {
+                          onOpenMonthlyGridWithFilter({});
+                        } else {
+                          openCasePage('all_shifts');
+                        }
+                      },
                     },
                   ].map((bar) => (
                     <button
@@ -2395,19 +2536,21 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
                     )}
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setIsSimPanelOpen((prev) => !prev)}
-                    className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-extrabold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
-                      simulation.isActive || isSimPanelOpen
-                        ? 'bg-amber-600 hover:bg-amber-500 border-amber-500 text-white'
-                        : 'bg-slate-100 dark:bg-[#131C34] hover:bg-violet-600 hover:text-white border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200'
-                    }`}
-                    title="فتح أو إغلاق لوحة محاكاة واختبار السيستم"
-                  >
-                    <FlaskConical className="w-3.5 h-3.5" />
-                    <span>محاكاة السستم</span>
-                  </button>
+                  {canUseSimulationLab && (
+                    <button
+                      type="button"
+                      onClick={() => setIsSimPanelOpen((prev) => !prev)}
+                      className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-extrabold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
+                        simulation.isActive || isSimPanelOpen
+                          ? 'bg-amber-600 hover:bg-amber-500 border-amber-500 text-white'
+                          : 'bg-slate-100 dark:bg-[#131C34] hover:bg-violet-600 hover:text-white border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200'
+                      }`}
+                      title="فتح أو إغلاق لوحة محاكاة واختبار السيستم"
+                    >
+                      <FlaskConical className="w-3.5 h-3.5" />
+                      <span>محاكاة السستم</span>
+                    </button>
+                  )}
 
                   {canAccessRoute(currentUser, 'live_monitoring', securityPolicy) && (
                     <button
@@ -2423,8 +2566,8 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
                 </div>
               </div>
 
-              {/* 2. لوحة محاكاة واختبار السيستم التفاعلية (تعمل بضغطة واحدة دون المساس بسجلات الحضور الفعلية) */}
-              {(isSimPanelOpen || simulation.isActive) && (
+              {/* 2. لوحة محاكاة واختبار السيستم التفاعلية (تظهر فقط للأدوار المخولة بالاختبار والتشغيل) */}
+              {canUseSimulationLab && (isSimPanelOpen || simulation.isActive) && (
                 <div className="rounded-xl border border-amber-300/80 dark:border-amber-700/60 bg-amber-50/70 dark:bg-[#161D33] p-3 space-y-2.5 text-[11px]">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-1.5 font-extrabold text-amber-900 dark:text-amber-300">
@@ -2734,20 +2877,22 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
                   </div>
                 )}
 
-                {/* زر مباشر لتشغيل المحاكاة إذا لم تتوفر إحداثيات GPS نشطة حالياً */}
+                {/* إشعار إرشادي عند عدم توفر إحداثيات GPS نشطة (مع زر المحاكاة للأدوار المخولة فقط) */}
                 {mapsApiKey && overviewRepsWithGps.length === 0 && (
                   <div className="absolute bottom-2.5 right-2.5 left-2.5 bg-slate-900/92 text-white p-2.5 rounded-xl border border-slate-700 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                     <span className="text-slate-200 font-bold">
                       لا توجد إشارات GPS مسجلة حالياً ضمن هذا الفلتر
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => handleRunSimScenario('balanced_fleet')}
-                      className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold flex items-center gap-1 cursor-pointer shrink-0"
-                    >
-                      <FlaskConical className="w-3.5 h-3.5" />
-                      <span>تشغيل محاكاة لاختبار السيستم</span>
-                    </button>
+                    {canUseSimulationLab && (
+                      <button
+                        type="button"
+                        onClick={() => handleRunSimScenario('balanced_fleet')}
+                        className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold flex items-center gap-1 cursor-pointer shrink-0"
+                      >
+                        <FlaskConical className="w-3.5 h-3.5" />
+                        <span>تشغيل محاكاة لاختبار السيستم</span>
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -2953,7 +3098,7 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
                   </div>
                 )}
 
-                {/* تبويب التبديل السريع بين: (ملخص المناديب والتنبيهات حسب الأولوية) و (ملخص الفرق والقطاعات) */}
+                {/* تبويب التبديل السريع بين ملخص المناديب وملخص الفرق (يُخفى تبويب المقارنة بين الفرق لمشرف الفريق الواحد) */}
                 <div className="flex items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-2">
                   <div className="inline-flex items-center rounded-lg bg-slate-100 dark:bg-[#131C34] p-0.5 border border-slate-200 dark:border-slate-800 text-[11px]">
                     <button
@@ -2965,19 +3110,23 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
                           : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                       }`}
                     >
-                      ملخص المناديب ({filteredLiveReps.length})
+                      {roleWorkspace.isSingleTeamScoped
+                        ? `مندوبو فريقي (${filteredLiveReps.length})`
+                        : `ملخص المناديب (${filteredLiveReps.length})`}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setOverviewMapTab('teams')}
-                      className={`px-2.5 py-1 rounded-md font-extrabold transition-colors cursor-pointer ${
-                        overviewMapTab === 'teams'
-                          ? 'bg-violet-600 text-white'
-                          : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-                      }`}
-                    >
-                      ملخص الفرق ({teamRegions.length})
-                    </button>
+                    {(!roleWorkspace.isSingleTeamScoped || teamRegions.length > 1) && (
+                      <button
+                        type="button"
+                        onClick={() => setOverviewMapTab('teams')}
+                        className={`px-2.5 py-1 rounded-md font-extrabold transition-colors cursor-pointer ${
+                          overviewMapTab === 'teams'
+                            ? 'bg-violet-600 text-white'
+                            : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                        }`}
+                      >
+                        ملخص الفرق ({teamRegions.length})
+                      </button>
+                    )}
                   </div>
 
                   <span className="text-[10px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
@@ -2986,11 +3135,12 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
                   </span>
                 </div>
 
-                {overviewMapTab === 'live_reps' ? (
+                {overviewMapTab === 'live_reps' ||
+                (roleWorkspace.isSingleTeamScoped && teamRegions.length <= 1) ? (
                   filteredLiveReps.length === 0 ? (
                     <div className="py-5 text-center space-y-2 text-xs text-slate-500 dark:text-slate-400">
                       <p>لا يوجد مناديب مطابقون للفلتر المحدد حالياً.</p>
-                      {!simulation.isActive && (
+                      {canUseSimulationLab && !simulation.isActive && (
                         <button
                           type="button"
                           onClick={() => handleRunSimScenario('balanced_fleet')}

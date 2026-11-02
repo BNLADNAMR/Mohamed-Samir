@@ -164,25 +164,46 @@ export const CellEditorModal: React.FC<CellEditorModalProps> = ({
             </div>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
-                حالة اختيار الشفت
-              </label>
-              <select
-                value={shiftSelection}
-                disabled={!canEditShiftSelection || isExternalProtectedForSupervisor}
-                onChange={(e) =>
-                  setShiftSelection(e.target.value as ShiftSelectionStatus)
-                }
-                className="w-full border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-indigo-600 text-xs"
-              >
-                <option value="selected">اختار الشفت</option>
-                <option value="not_selected">لم يختر</option>
-                <option value="undecided">لم يحدد بعد</option>
-                <option value="exempt">معفى (إجازة / راحة)</option>
-              </select>
-            </div>
+          <div
+            className={`grid grid-cols-1 ${
+              canEditShiftSelection ? 'sm:grid-cols-2' : ''
+            } gap-4`}
+          >
+            {canEditShiftSelection ? (
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                  حالة اختيار الشفت
+                </label>
+                <select
+                  value={shiftSelection}
+                  disabled={isExternalProtectedForSupervisor}
+                  onChange={(e) =>
+                    setShiftSelection(e.target.value as ShiftSelectionStatus)
+                  }
+                  className="w-full border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-indigo-600 text-xs"
+                >
+                  <option value="selected">اختار الشفت</option>
+                  <option value="not_selected">لم يختر</option>
+                  <option value="undecided">لم يحدد بعد</option>
+                  <option value="exempt">معفى (إجازة / راحة)</option>
+                </select>
+              </div>
+            ) : (
+              <div className="px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                <span className="text-slate-500 dark:text-slate-400">
+                  حالة جدولة الشفت المسجلة:
+                </span>
+                <strong className="text-slate-800 dark:text-slate-200">
+                  {shiftSelection === 'selected'
+                    ? 'اختار الشفت'
+                    : shiftSelection === 'not_selected'
+                    ? 'لم يختر'
+                    : shiftSelection === 'exempt'
+                    ? 'معفى (إجازة / راحة)'
+                    : 'لم يحدد بعد'}
+                </strong>
+              </div>
+            )}
 
             <div>
               <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1.5">

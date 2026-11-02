@@ -45,6 +45,8 @@ import {
   Team,
   UserProfile,
 } from '../types';
+import { canAccessRoute } from '../utils/rbac';
+import { buildRoleWorkspaceConfig } from '../utils/roleWorkspaces';
 import {
   ALL_REP_BATCHES,
   LiveAlertFilterMode,
@@ -521,11 +523,25 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
       .sort((a, b) => (b.triggeredAtMs || 0) - (a.triggeredAtMs || 0));
   }, [alertLogs, historyStatusFilter, historySeverityFilter]);
 
+  const roleWorkspace = useMemo(
+    () =>
+      buildRoleWorkspaceConfig(currentUser, securityPolicy, {
+        teamName: teamsById[currentUser.teamId || '']?.teamName,
+      }),
+    [currentUser, securityPolicy, teamsById]
+  );
+  const canUseSimulationLab = roleWorkspace.capabilities.canUseSimulationLab;
+  const canOpenMonthlyGrid = canAccessRoute(
+    currentUser,
+    'monthly_grid',
+    securityPolicy
+  );
+
   const mapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
   return (
     <main className="flex-1 p-4 sm:p-6 max-w-[1900px] w-full mx-auto space-y-4">
-      {/* 1. رأس لوحة المراقبة الحية للمناديب وأدوات الصوت والسجل التاريخي */}
+      {/* 1. رأس لوحة المراقبة الحية المخصص للدور */}
       <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-4 sm:p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-start gap-3">
@@ -535,14 +551,14 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-base sm:text-lg font-extrabold text-slate-900 dark:text-white">
-                  لوحة المراقبة الحية للمناديب والتنبيهات الذكية
+                  {roleWorkspace.liveMapTitleAr}
                 </h1>
                 <span className="text-xs font-mono tabular-nums text-emerald-700 dark:text-emerald-400 font-bold">
                   · بث لحظي ({todayStr})
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                متابعة فورية لمواقع GPS، المحافظ النقدية، الباتشات (Batch 1–6)، وترتيب المناديب حسب الأولوية والأداء الفعلي المسجل بالنظام
+                {roleWorkspace.liveMapSubtitleAr}
               </p>
             </div>
           </div>
@@ -581,21 +597,23 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
               <span>اختبار الصوت</span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setIsSimBarOpen((prev) => !prev)}
-              className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs font-extrabold border flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
-                simulation.isActive || isSimBarOpen
-                  ? 'bg-amber-600 hover:bg-amber-500 border-amber-500 text-white'
-                  : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-100'
-              }`}
-              title="فتح أو إغلاق معمل محاكاة واختبار السيستم"
-            >
-              <FlaskConical className="w-3.5 h-3.5" />
-              <span>
-                {simulation.isActive ? 'محاكاة الاختبار: نشطة' : 'محاكاة الاختبار'}
-              </span>
-            </button>
+            {canUseSimulationLab && (
+              <button
+                type="button"
+                onClick={() => setIsSimBarOpen((prev) => !prev)}
+                className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs font-extrabold border flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                  simulation.isActive || isSimBarOpen
+                    ? 'bg-amber-600 hover:bg-amber-500 border-amber-500 text-white'
+                    : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-100'
+                }`}
+                title="فتح أو إغلاق معمل محاكاة واختبار السيستم"
+              >
+                <FlaskConical className="w-3.5 h-3.5" />
+                <span>
+                  {simulation.isActive ? 'محاكاة الاختبار: نشطة' : 'محاكاة الاختبار'}
+                </span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -611,7 +629,7 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
           </div>
         </div>
 
-        {(isSimBarOpen || simulation.isActive) && (
+        {canUseSimulationLab && (isSimBarOpen || simulation.isActive) && (
           <div className="rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50/70 dark:bg-slate-800/80 p-3.5 space-y-2.5 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="font-extrabold text-amber-900 dark:text-amber-300 flex items-center gap-1.5">
@@ -1250,7 +1268,9 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                     <span>لا توجد إحداثيات GPS نشطة للمناديب ضمن الفلتر الحالي</span>
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    تظهر العلامات على الخريطة فور قيام المندوب بتفعيل مشاركة موقعه المباشر من «بوابتي الشخصية»، أو عند تحديث موقع المندوب من القائمة الجانبية بواسطة المشرف أو مدير التشغيل.
+                    {roleWorkspace.isReadOnlyWorkspace
+                      ? 'تظهر مواقع المناديب تلقائياً على الخريطة فور مشاركة المندوب لموقعه أثناء العمل أو تحديث بياناته الميدانية.'
+                      : 'تظهر العلامات على الخريطة فور قيام المندوب بتفعيل مشاركة موقعه المباشر من «بوابتي الشخصية»، أو عند تحديث موقع المندوب من القائمة الجانبية.'}
                   </p>
                 </div>
               )}
@@ -1326,14 +1346,16 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
                     </button>
                   )}
 
-                  <button
-                    type="button"
-                    onClick={() => onInspectEmployeeInGrid(selectedRep.employee)}
-                    className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 font-bold flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Calendar className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-                    <span>فتح سجله في الجدول الشهري</span>
-                  </button>
+                  {canOpenMonthlyGrid && !simulation.usesSyntheticFleet && (
+                    <button
+                      type="button"
+                      onClick={() => onInspectEmployeeInGrid(selectedRep.employee)}
+                      className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 font-bold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Calendar className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                      <span>فتح سجله في الجدول الشهري</span>
+                    </button>
+                  )}
 
                   <button
                     type="button"

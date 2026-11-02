@@ -40,6 +40,7 @@ import {
 } from '../types';
 import { NavigationSnapshot } from '../utils/navigationHistory';
 import { ROLE_SHORT_LABELS_AR } from '../utils/rbac';
+import { buildRoleWorkspaceConfig } from '../utils/roleWorkspaces';
 import {
   buildDrawerSectionGroups,
   DrawerCountsInput,
@@ -78,6 +79,11 @@ export const AppSectionsDrawer: React.FC<AppSectionsDrawerProps> = ({
     Record<string, boolean>
   >({});
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  const roleWorkspace = useMemo(
+    () => buildRoleWorkspaceConfig(currentUser, securityPolicy),
+    [currentUser, securityPolicy]
+  );
 
   const groups = useMemo(
     () =>
@@ -424,14 +430,17 @@ export const AppSectionsDrawer: React.FC<AppSectionsDrawerProps> = ({
               <div className="flex items-center gap-2">
                 <ShieldCheck className="w-4 h-4 text-indigo-400 shrink-0" />
                 <h2 className="text-sm font-extrabold text-white truncate">
-                  دليل جميع أقسام النظام
+                  {roleWorkspace.workspaceTitleAr}
                 </h2>
                 <span className="text-[11px] font-mono tabular-nums text-slate-400">
                   ({totalItemsCount})
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-0.5 truncate">
-                {currentUser.name} · {ROLE_SHORT_LABELS_AR[currentUser.role]}
+                {currentUser.name} · {ROLE_SHORT_LABELS_AR[currentUser.role]} ·{' '}
+                <span className="font-mono tabular-nums text-indigo-300">
+                  {roleWorkspace.activePermissionsCount} صلاحية مفعلة
+                </span>
               </p>
             </div>
 

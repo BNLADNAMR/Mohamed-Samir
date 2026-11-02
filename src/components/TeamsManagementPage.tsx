@@ -193,13 +193,27 @@ export const TeamsManagementPage: React.FC<TeamsManagementPageProps> = ({
         <div>
           <div className="flex items-center gap-2 text-indigo-600 dark:text-indigo-400 text-xs font-bold mb-1">
             <ShieldCheck className="w-4 h-4" />
-            عزل نطاق البيانات التشغيلي (Team Data Scope)
+            <span>
+              {currentUser.role === 'supervisor'
+                ? 'نطاق إشراف الفريق الميداني'
+                : canManageTeams
+                ? 'إدارة وعزل نطاق الفرق'
+                : 'استعراض فرق المندوبين (عرض فقط)'}
+            </span>
           </div>
           <h1 className="text-lg font-extrabold text-slate-900 dark:text-white">
-            إدارة الفرق والمشرفين وتوزيع المندوبين
+            {currentUser.role === 'supervisor'
+              ? 'بطاقة وبيانات أعضاء فريقي'
+              : canManageTeams
+              ? 'إدارة الفرق والمشرفين وتوزيع المندوبين'
+              : 'فرق التوصيل والمشرفون وأعضاء الفرق'}
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            كل مندوب ينتمي إلى فريق أساسي نشط واحد فقط، ولا يرى كل مشرف سوى مندوبي وشفتات فريقه المخصص.
+            {currentUser.role === 'supervisor'
+              ? 'تعرض هذه الصفحة أعضاء فريقك المخصص لك فقط لمتابعة بياناتهم وحالتهم التشغيلية.'
+              : canManageTeams
+              ? 'تأسيس الفرق وتعيين المشرفين وتسكين المندوبين مع عزل نطاق البيانات لكل فريق.'
+              : 'استعراض هيكل الفرق والمشرفين والمندوبين المسجلين في النظام دون تعديل توزيع الفرق.'}
           </p>
         </div>
 

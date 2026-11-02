@@ -43,9 +43,12 @@ import {
 } from '../types';
 import {
   ALL_PERMISSIONS,
+  canAccessRoute,
+  hasPermission,
   resolveEffectivePermissions,
   ROLE_LABELS_AR,
 } from '../utils/rbac';
+import { buildRoleWorkspaceConfig } from '../utils/roleWorkspaces';
 import {
   evaluatePasswordStrength,
   PROFILE_SECTIONS_ORDERED,
@@ -1667,20 +1670,28 @@ export const ProfileAndRepPortalPage: React.FC<ProfileAndRepPortalPageProps> = (
                   </div>
 
                   {(currentUser.role === 'delivery_rep' ||
-                    currentUser.role === 'supervisor') && (
-                    <button
-                      type="button"
-                      onClick={onNavigateToRequests}
-                      className="px-3.5 py-2 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg font-bold flex items-center gap-1.5 text-slate-800 dark:text-slate-200 whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      <FilePlus2 className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-                      طلب تصحيح بيانات تشغيلية
-                    </button>
-                  )}
+                    currentUser.role === 'supervisor') &&
+                    canAccessRoute(currentUser, 'requests', securityPolicy) &&
+                    hasPermission(currentUser, 'leave.request', securityPolicy) && (
+                      <button
+                        type="button"
+                        onClick={onNavigateToRequests}
+                        className="px-3.5 py-2 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg font-bold flex items-center gap-1.5 text-slate-800 dark:text-slate-200 whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        <FilePlus2 className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                        طلب تصحيح بيانات تشغيلية
+                      </button>
+                    )}
                 </div>
 
-                {/* بطاقة البيانات الوظيفية المحمية */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                {/* بطاقة البيانات الوظيفية المحمية والمخصصة حسب طبيعة الدور */}
+                <div
+                  className={`grid grid-cols-1 sm:grid-cols-2 ${
+                    myEmployee || currentUser.role === 'delivery_rep'
+                      ? 'lg:grid-cols-4'
+                      : 'lg:grid-cols-3'
+                  } gap-3`}
+                >
                   <div className="p-3.5 rounded-lg bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800">
                     <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
                       الدور الوظيفي المعتمد
@@ -1691,24 +1702,28 @@ export const ProfileAndRepPortalPage: React.FC<ProfileAndRepPortalPageProps> = (
                   </div>
                   <div className="p-3.5 rounded-lg bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800">
                     <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
-                      نطاق الفريق المخصص
+                      نطاق العمل المخصص للدور
                     </span>
                     <strong className="font-bold text-slate-900 dark:text-white mt-1 block">
-                      {myTeam
-                        ? `${myTeam.teamName} (${myTeam.teamId})`
-                        : currentUser.teamId || 'نطاق عام حسب الصلاحية'}
+                      {buildRoleWorkspaceConfig(currentUser, securityPolicy, {
+                        teamName: myTeam?.teamName,
+                        employeeName: myEmployee?.fullName,
+                        employeeCode: myEmployee?.employeeCode,
+                      }).scopeBadgeAr}
                     </strong>
                   </div>
-                  <div className="p-3.5 rounded-lg bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800">
-                    <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
-                      سجل المندوب المرتبط
-                    </span>
-                    <strong className="font-bold text-slate-900 dark:text-white mt-1 block">
-                      {myEmployee
-                        ? `${myEmployee.fullName} (${myEmployee.employeeCode})`
-                        : 'غير مرتبط بسجل مندوب ميداني'}
-                    </strong>
-                  </div>
+                  {(myEmployee || currentUser.role === 'delivery_rep') && (
+                    <div className="p-3.5 rounded-lg bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800">
+                      <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
+                        سجل المندوب المرتبط
+                      </span>
+                      <strong className="font-bold text-slate-900 dark:text-white mt-1 block">
+                        {myEmployee
+                          ? `${myEmployee.fullName} (${myEmployee.employeeCode})`
+                          : 'قيد الربط من الإدارة'}
+                      </strong>
+                    </div>
+                  )}
                   <div className="p-3.5 rounded-lg bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800">
                     <span className="text-[11px] text-slate-500 dark:text-slate-400 block">
                       تاريخ تفعيل الحساب
@@ -1891,14 +1906,17 @@ export const ProfileAndRepPortalPage: React.FC<ProfileAndRepPortalPageProps> = (
             </button>
           )}
 
-          <button
-            type="button"
-            onClick={onNavigateToRequests}
-            className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <FilePlus2 className="w-4 h-4" />
-            تقديم طلب إجازة أو تصحيح حضور
-          </button>
+          {canAccessRoute(currentUser, 'requests', securityPolicy) &&
+            hasPermission(currentUser, 'leave.request', securityPolicy) && (
+              <button
+                type="button"
+                onClick={onNavigateToRequests}
+                className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <FilePlus2 className="w-4 h-4" />
+                تقديم طلب إجازة أو تصحيح حضور
+              </button>
+            )}
         </div>
       </div>
 
@@ -1940,33 +1958,36 @@ export const ProfileAndRepPortalPage: React.FC<ProfileAndRepPortalPageProps> = (
               )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              {isSharingLiveGps ? (
-                <button
-                  type="button"
-                  onClick={handleStopLiveGpsSharing}
-                  className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-extrabold flex items-center gap-1.5 cursor-pointer"
-                >
-                  <MapPin className="w-4 h-4" />
-                  <span>إيقاف مشاركة الموقع (Offline)</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsSharingLiveGps(true);
-                    onNotify(
-                      'تم تفعيل البث المباشر لموقع العمل GPS بموافقتك.',
-                      'success'
-                    );
-                  }}
-                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold flex items-center gap-1.5 cursor-pointer"
-                >
-                  <MapPin className="w-4 h-4" />
-                  <span>تفعيل مشاركة الموقع المباشر (Online GPS)</span>
-                </button>
-              )}
-            </div>
+            {(!securityPolicy.emergencyReadOnlyMode ||
+              currentUser.role === 'super_admin') && (
+              <div className="flex flex-wrap items-center gap-2">
+                {isSharingLiveGps ? (
+                  <button
+                    type="button"
+                    onClick={handleStopLiveGpsSharing}
+                    className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-extrabold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <MapPin className="w-4 h-4" />
+                    <span>إيقاف مشاركة الموقع (Offline)</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSharingLiveGps(true);
+                      onNotify(
+                        'تم تفعيل البث المباشر لموقع العمل GPS بموافقتك.',
+                        'success'
+                      );
+                    }}
+                    className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <MapPin className="w-4 h-4" />
+                    <span>تفعيل مشاركة الموقع المباشر (Online GPS)</span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* مؤشرات الأداء الشخصية */}
@@ -2083,58 +2104,62 @@ export const ProfileAndRepPortalPage: React.FC<ProfileAndRepPortalPageProps> = (
             </div>
           </div>
 
-          {/* آخر طلبات المندوب */}
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-3 text-xs">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-extrabold text-slate-900 dark:text-white">
-                متابعة حالة طلباتك الأخيرة ({myRequests.length})
-              </h2>
-              <button
-                type="button"
-                onClick={onNavigateToRequests}
-                className="text-indigo-600 dark:text-indigo-400 font-bold hover:underline"
-              >
-                عرض كل الطلبات أو إرسال طلب جديد
-              </button>
-            </div>
-
-            {myRequests.length === 0 ? (
-              <p className="text-slate-500">
-                لم تقم بإرسال أي طلبات إجازة أو تصحيح حضور حتى الآن.
-              </p>
-            ) : (
-              <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                {myRequests.map((r) => (
-                  <div
-                    key={r.requestId}
-                    className="py-2.5 flex flex-wrap items-center justify-between gap-2"
-                  >
-                    <div>
-                      <span className="font-bold">
-                        {REQUEST_TYPE_LABELS[r.requestType]}
-                      </span>{' '}
-                      <span className="font-mono tabular-nums text-slate-500">
-                        ({r.requestDate})
-                      </span>
-                      <p className="text-slate-600 dark:text-slate-400 mt-0.5">
-                        {r.description}
-                      </p>
-                    </div>
-                    <div className="text-left">
-                      <span className="px-2.5 py-1 rounded bg-slate-100 dark:bg-slate-800 font-bold">
-                        {REQUEST_STATUS_LABELS[r.status]}
-                      </span>
-                      {r.reviewComment && (
-                        <div className="text-[10px] text-slate-500 mt-1">
-                          رد الإدارة: {r.reviewComment}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
+          {/* آخر طلبات المندوب (يظهر فقط إذا كان قسم الطلبات مفعلاً للدور) */}
+          {canAccessRoute(currentUser, 'requests', securityPolicy) && (
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-3 text-xs">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                  متابعة حالة طلباتك الأخيرة ({myRequests.length})
+                </h2>
+                <button
+                  type="button"
+                  onClick={onNavigateToRequests}
+                  className="text-indigo-600 dark:text-indigo-400 font-bold hover:underline cursor-pointer"
+                >
+                  {hasPermission(currentUser, 'leave.request', securityPolicy)
+                    ? 'عرض كل الطلبات أو إرسال طلب جديد'
+                    : 'استعراض سجل الطلبات'}
+                </button>
               </div>
-            )}
-          </div>
+
+              {myRequests.length === 0 ? (
+                <p className="text-slate-500">
+                  لم تقم بإرسال أي طلبات إجازة أو تصحيح حضور حتى الآن.
+                </p>
+              ) : (
+                <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {myRequests.map((r) => (
+                    <div
+                      key={r.requestId}
+                      className="py-2.5 flex flex-wrap items-center justify-between gap-2"
+                    >
+                      <div>
+                        <span className="font-bold">
+                          {REQUEST_TYPE_LABELS[r.requestType]}
+                        </span>{' '}
+                        <span className="font-mono tabular-nums text-slate-500">
+                          ({r.requestDate})
+                        </span>
+                        <p className="text-slate-600 dark:text-slate-400 mt-0.5">
+                          {r.description}
+                        </p>
+                      </div>
+                      <div className="text-left">
+                        <span className="px-2.5 py-1 rounded bg-slate-100 dark:bg-slate-800 font-bold">
+                          {REQUEST_STATUS_LABELS[r.status]}
+                        </span>
+                        {r.reviewComment && (
+                          <div className="text-[10px] text-slate-500 mt-1">
+                            رد الإدارة: {r.reviewComment}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </main>

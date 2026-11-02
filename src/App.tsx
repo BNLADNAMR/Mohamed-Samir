@@ -69,6 +69,7 @@ import {
   hasPermission,
   ROLE_SHORT_LABELS_AR,
 } from './utils/rbac';
+import { buildRoleWorkspaceConfig } from './utils/roleWorkspaces';
 import {
   clearAllOperationalDataFirestore,
   createRepSmartAlertLog,
@@ -188,7 +189,18 @@ function AuthenticatedWorkspace({
 
   // ضمان أمان الأنواع (يتم استدعاء هذا المكون فقط بعد التأكد من وجود userProfile)
   const currentUser = userProfile!;
-  const defaultRoute = getDefaultRouteForRole(currentUser.role);
+  const defaultRoute = getDefaultRouteForRole(
+    currentUser.role,
+    currentUser,
+    securityPolicy
+  );
+  const canReadUsersCollection =
+    currentUser.role === 'super_admin' ||
+    (currentUser.role === 'operations_manager' &&
+      hasPermission(currentUser, 'users.view', securityPolicy));
+  const canReadOperationalAuditLogs =
+    currentUser.role === 'operations_manager' &&
+    hasPermission(currentUser, 'audit.view', securityPolicy);
 
   const getInitialSecurityTabFromRoute = (route: AppRoutePage): SecurityHubTab => {
     if (route === 'users') return 'users';
@@ -778,11 +790,8 @@ function AuthenticatedWorkspace({
       );
     }
 
-    // 5. المستخدمون والدعوات (Users & Invitations) للإدارة فقط
-    if (
-      currentUser.role === 'super_admin' ||
-      currentUser.role === 'operations_manager'
-    ) {
+    // 5. المستخدمون والدعوات (Users & Invitations) للإدارة المخولة فقط
+    if (canReadUsersCollection) {
       unsubs.push(
         onSnapshot(
           collection(db, 'users'),
@@ -794,6 +803,8 @@ function AuthenticatedWorkspace({
           () => {}
         )
       );
+    } else {
+      setAllUsers([currentUser]);
     }
 
     if (currentUser.role === 'super_admin') {
@@ -863,7 +874,7 @@ function AuthenticatedWorkspace({
           () => {}
         )
       );
-    } else if (currentUser.role === 'operations_manager') {
+    } else if (canReadOperationalAuditLogs) {
       unsubs.push(
         onSnapshot(
           query(
@@ -898,6 +909,8 @@ function AuthenticatedWorkspace({
           () => {}
         )
       );
+    } else {
+      setAuditLogs([]);
     }
 
     // 7. سجل النشاط الأمني الخاص بحساب المستخدم الحالي (للملف الشخصي)
@@ -1092,7 +1105,14 @@ function AuthenticatedWorkspace({
       isUnmounted = true;
       unsubs.forEach((fn) => fn());
     };
-  }, [currentUser.uid, currentUser.role, currentUser.teamId, currentUser.employeeId]);
+  }, [
+    currentUser.uid,
+    currentUser.role,
+    currentUser.teamId,
+    currentUser.employeeId,
+    canReadUsersCollection,
+    canReadOperationalAuditLogs,
+  ]);
 
   const daysInMonth = useMemo(() => {
     return getDaysInMonth(currentYear, currentMonth);
@@ -1115,16 +1135,50 @@ function AuthenticatedWorkspace({
   const isCurrentMonthView =
     today.getFullYear() === currentYear && today.getMonth() + 1 === currentMonth;
 
-  // صلاحيات الأزرار الإجرائية في الجدول
-  const canCreateEmp = hasPermission(currentUser, 'employees.create', securityPolicy);
-  const canEditEmp =
-    hasPermission(currentUser, 'employees.edit', securityPolicy) ||
-    currentUser.role === 'supervisor';
-  const canDeleteEmp = hasPermission(currentUser, 'employees.delete', securityPolicy);
-  const canExportReport = hasPermission(currentUser, 'reports.export', securityPolicy);
-  const canEditShiftSelection = hasPermission(currentUser, 'shifts.edit', securityPolicy);
-  const canDeleteAttendance =
-    currentUser.role === 'super_admin' || currentUser.role === 'operations_manager';
+  const myScopedTeam = useMemo(
+    () =>
+      currentUser.teamId
+        ? teams.find((t) => t.teamId === currentUser.teamId) || null
+        : null,
+    [currentUser.teamId, teams]
+  );
+
+  const myScopedEmployee = useMemo(
+    () =>
+      employees.find(
+        (e) =>
+          (currentUser.employeeId && e.id === currentUser.employeeId) ||
+          e.userId === currentUser.uid
+      ) || null,
+    [employees, currentUser.employeeId, currentUser.uid]
+  );
+
+  const roleWorkspace = useMemo(
+    () =>
+      buildRoleWorkspaceConfig(currentUser, securityPolicy, {
+        teamName: myScopedTeam?.teamName,
+        employeeName: myScopedEmployee?.fullName,
+        employeeCode: myScopedEmployee?.employeeCode,
+      }),
+    [
+      currentUser,
+      securityPolicy,
+      myScopedTeam?.teamName,
+      myScopedEmployee?.fullName,
+      myScopedEmployee?.employeeCode,
+    ]
+  );
+
+  // صلاحيات الأزرار الإجرائية في الواجهة وفق الدور والصلاحيات الفعلية بدقة ودون أي تسريب
+  const canCreateEmp = roleWorkspace.capabilities.canCreateEmployee;
+  const canEditEmp = roleWorkspace.capabilities.canEditEmployee;
+  const canDeleteEmp = roleWorkspace.capabilities.canDeleteEmployee;
+  const canExportReport = roleWorkspace.capabilities.canExportReports;
+  const canPrintReport = roleWorkspace.capabilities.canPrintReports;
+  const canManageSync = roleWorkspace.capabilities.canManageIntegrationSync;
+  const canEditShiftSelection = roleWorkspace.capabilities.canEditShiftSelection;
+  const canDeleteAttendance = roleWorkspace.capabilities.canDeleteAttendance;
+  const canUseSimulationLab = roleWorkspace.capabilities.canUseSimulationLab;
 
   const handleMigrateLegacyLocalToCloud = async () => {
     if (legacyLocalEmployees.length === 0) return;
@@ -1360,6 +1414,7 @@ function AuthenticatedWorkspace({
 
   const handleStartOrApplySimScenario = useCallback(
     (scenario: SimulationScenarioId) => {
+      if (!canUseSimulationLab) return;
       const now = Date.now();
       setLiveClockMs(now);
       setSimState((prev) => {
@@ -1383,6 +1438,7 @@ function AuthenticatedWorkspace({
       );
     },
     [
+      canUseSimulationLab,
       employees,
       summaries,
       attendanceRecords,
@@ -1411,6 +1467,12 @@ function AuthenticatedWorkspace({
     setLiveClockMs(Date.now());
     showToast('تم إيقاف المحاكاة واستعادة القراءة المباشرة من قاعدة البيانات.', 'info');
   }, [showToast]);
+
+  useEffect(() => {
+    if (simState.isActive && !canUseSimulationLab) {
+      handleStopSimulation();
+    }
+  }, [simState.isActive, canUseSimulationLab, handleStopSimulation]);
 
   const handleSyncSimulationToCloud = useCallback(async () => {
     if (!simState.isActive || simState.usesSyntheticFleet) {
@@ -2201,16 +2263,24 @@ function AuthenticatedWorkspace({
   const handleDrawerQuickAction = (actionId: DrawerQuickActionId) => {
     switch (actionId) {
       case 'open_add_employee':
-        setEmployeeModalState({ open: true, editingEmployee: null });
+        if (canCreateEmp) {
+          setEmployeeModalState({ open: true, editingEmployee: null });
+        }
         break;
       case 'open_sync_modal':
-        setIsSyncModalOpen(true);
+        if (canManageSync) {
+          setIsSyncModalOpen(true);
+        }
         break;
       case 'export_csv':
-        void handleExportCSV();
+        if (canExportReport) {
+          void handleExportCSV();
+        }
         break;
       case 'print_page':
-        window.print();
+        if (canPrintReport) {
+          window.print();
+        }
         break;
       case 'toggle_theme':
         setIsDarkMode((prev) => !prev);
@@ -2273,15 +2343,16 @@ function AuthenticatedWorkspace({
               type="button"
               onClick={() => setIsSectionsDrawerOpen(true)}
               className="min-h-[40px] px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-extrabold flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-              title="فتح القائمة الجانبية المنظمة لجميع أقسام النظام (Alt + M)"
+              title="فتح القائمة الجانبية المنظمة للأقسام المتاحة لدورك (Alt + M)"
             >
               <Menu className="w-4 h-4 shrink-0" />
               <span>جميع الأقسام</span>
-              {pendingRequestsCount > 0 && (
-                <span className="px-1.5 py-0.5 rounded bg-amber-400 text-slate-950 font-mono tabular-nums text-[10px] font-extrabold">
-                  {pendingRequestsCount}
-                </span>
-              )}
+              {canAccessRoute(currentUser, 'requests', securityPolicy) &&
+                pendingRequestsCount > 0 && (
+                  <span className="px-1.5 py-0.5 rounded bg-amber-400 text-slate-950 font-mono tabular-nums text-[10px] font-extrabold">
+                    {pendingRequestsCount}
+                  </span>
+                )}
             </button>
 
             {canAccessRoute(currentUser, 'live_monitoring', securityPolicy) && (
@@ -2293,7 +2364,7 @@ function AuthenticatedWorkspace({
                     ? 'bg-rose-600 border-rose-500 text-white'
                     : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-white'
                 }`}
-                title="لوحة المراقبة الحية للمناديب والتنبيهات الذكية (Live Map)"
+                title={roleWorkspace.liveMapTitleAr}
               >
                 <Radio
                   className={`w-4 h-4 shrink-0 ${
@@ -2351,7 +2422,7 @@ function AuthenticatedWorkspace({
               >
                 /
               </span>
-              <span className="hidden lg:inline text-xs font-bold text-slate-300 truncate max-w-[320px]">
+              <span className="hidden lg:inline text-xs font-bold text-slate-300 truncate max-w-[340px]">
                 {!isRouteAuthorized
                   ? 'صفحة محجوبة الصلاحية (403)'
                   : currentPageLabel}
@@ -2405,67 +2476,119 @@ function AuthenticatedWorkspace({
         </div>
       </header>
 
-      {/* شريط المسار الحالي والرجوع للخلف + الوصول السريع للقائمة الجانبية */}
+      {/* شريط الواجهة المخصصة حسب الدور والصلاحيات الفعلية (بدون أي تبويبات أو إعدادات خارج نطاق الدور) */}
       <div className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 sm:px-6 py-2.5 no-print transition-colors duration-150">
-        <div className="max-w-[1900px] mx-auto flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={handleGlobalBack}
-              className={`min-h-[38px] px-3.5 py-1.5 rounded-lg font-extrabold flex items-center gap-2 transition-colors cursor-pointer ${
-                backTargetHint || hasOpenModal
-                  ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-2xs'
-                  : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border border-slate-300 dark:border-slate-700'
-              }`}
-            >
-              <ArrowRight className="w-4 h-4 shrink-0" />
-              <span>رجوع للخلف</span>
-            </button>
+        <div className="max-w-[1900px] mx-auto space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              <span className="px-2.5 py-1 rounded-md bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800/80 text-indigo-800 dark:text-indigo-200 font-extrabold whitespace-nowrap">
+                {roleWorkspace.workspaceTitleAr}
+              </span>
+              <span className="px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold whitespace-nowrap">
+                {roleWorkspace.scopeBadgeAr}
+              </span>
+              {roleWorkspace.isReadOnlyWorkspace && (
+                <span className="px-2.5 py-1 rounded-md bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300 font-bold inline-flex items-center gap-1 whitespace-nowrap">
+                  <Lock className="w-3 h-3 shrink-0" />
+                  وضع القراءة فقط
+                </span>
+              )}
+              <span className="hidden xl:inline text-[11px] text-slate-500 dark:text-slate-400 truncate max-w-[440px]">
+                {roleWorkspace.workspaceSubtitleAr}
+              </span>
+            </div>
 
-            <div className="flex flex-wrap items-center gap-2 text-slate-600 dark:text-slate-300">
-              <span className="text-slate-400 dark:text-slate-500">القسم الحالي:</span>
-              <strong className="font-extrabold text-slate-900 dark:text-white">
-                {!isRouteAuthorized ? 'صفحة محجوبة الصلاحية (403)' : currentPageLabel}
-              </strong>
-              {backTargetHint && (
-                <>
-                  <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">
-                    ·
-                  </span>
-                  <span className="text-slate-500 dark:text-slate-400">
-                    الخطوة السابقة:{' '}
-                    <span className="font-bold text-indigo-700 dark:text-indigo-300">
-                      {backTargetHint}
-                    </span>
-                  </span>
-                </>
+            <div className="flex items-center gap-2">
+              {(backTargetHint || hasOpenModal || !isAtRootHome) && (
+                <button
+                  type="button"
+                  onClick={handleGlobalBack}
+                  className="min-h-[34px] px-3 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 border border-slate-300 dark:border-slate-700 font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  title={backTargetHint ? `الرجوع إلى: ${backTargetHint}` : 'رجوع للخلف'}
+                >
+                  <ArrowRight className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>رجوع</span>
+                </button>
+              )}
+
+              {!isAtRootHome && (
+                <button
+                  type="button"
+                  onClick={() => navigateToRoute(defaultRoute)}
+                  className="min-h-[34px] px-3 py-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <Home className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                  <span>الرئيسية</span>
+                </button>
               )}
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            {!isAtRootHome && (
-              <button
-                type="button"
-                onClick={() => navigateToRoute(defaultRoute)}
-                className="min-h-[38px] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-              >
-                <Home className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-                <span>الصفحة الرئيسية</span>
-              </button>
-            )}
+          {/* تبويبات التنقل المخصصة للدور الحالي فقط */}
+          <nav
+            aria-label="أقسام الواجهة المخصصة للدور"
+            className="flex items-center gap-1.5 overflow-x-auto pb-0.5 pt-1 border-t border-slate-100 dark:border-slate-800/80"
+          >
+            {roleWorkspace.primaryNavTabs.map((tab) => {
+              const isTabActive =
+                activeCasePage === null &&
+                (activeRoute === tab.route ||
+                  (tab.route === 'security_center' && isSuperAdminInSecurityHub));
+              const showLiveBadge =
+                tab.route === 'live_monitoring' && activeLiveAlertsCount > 0;
+              const showReqBadge =
+                tab.route === 'requests' && pendingRequestsCount > 0;
 
-            <button
-              type="button"
-              onClick={() => setIsSectionsDrawerOpen(true)}
-              className="min-h-[38px] px-3 py-1.5 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50/70 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-            >
-              <Menu className="w-3.5 h-3.5" />
-              <span>قائمة الأقسام</span>
-            </button>
-          </div>
+              return (
+                <button
+                  key={tab.route}
+                  type="button"
+                  onClick={() => navigateToRoute(tab.route)}
+                  title={tab.descriptionAr}
+                  className={`min-h-[34px] px-3 py-1.5 rounded-lg text-xs font-extrabold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                    isTabActive
+                      ? 'bg-indigo-600 text-white shadow-2xs'
+                      : 'bg-slate-50 dark:bg-slate-800/70 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200/80 dark:border-slate-700/80'
+                  }`}
+                >
+                  <span>{tab.labelAr}</span>
+                  {showLiveBadge && (
+                    <span
+                      className={`px-1.5 py-0.5 rounded font-mono tabular-nums text-[10px] font-extrabold ${
+                        isTabActive
+                          ? 'bg-white text-rose-700'
+                          : 'bg-rose-600 text-white'
+                      }`}
+                    >
+                      {activeLiveAlertsCount}
+                    </span>
+                  )}
+                  {showReqBadge && (
+                    <span
+                      className={`px-1.5 py-0.5 rounded font-mono tabular-nums text-[10px] font-extrabold ${
+                        isTabActive
+                          ? 'bg-amber-300 text-slate-950'
+                          : 'bg-amber-500 text-slate-950'
+                      }`}
+                    >
+                      {pendingRequestsCount}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
         </div>
       </div>
+
+      {/* تنبيه هادئ ومباشر للمشرف في حال عدم تعيين فريق له بعد */}
+      {currentUser.role === 'supervisor' && !currentUser.teamId && (
+        <div className="bg-amber-50 dark:bg-amber-950/50 border-b border-amber-200 dark:border-amber-900 px-6 py-2.5 text-xs text-amber-950 dark:text-amber-200 no-print">
+          <div className="max-w-[1900px] mx-auto font-bold">
+            نطاق الإشراف بانتظار التفعيل: لم يتم ربط حسابك بفريق محدد بعد. ستظهر بيانات مندوبي فريقك تلقائياً فور تعيين الفريق من قِبل الإدارة.
+          </div>
+        </div>
+      )}
 
       {/* شريط حالة الطوارئ الأمني (تجميد التعديلات أو قفل النظام) */}
       {(securityPolicy.systemLockdownMode || securityPolicy.emergencyReadOnlyMode) && (
@@ -2751,6 +2874,10 @@ function AuthenticatedWorkspace({
           currentMonth={currentMonth}
           currentYear={currentYear}
           today={today}
+          canEditEmp={canEditEmp}
+          canEditAttendanceForEmp={(emp, rec) =>
+            canRecordOrEditAttendance(currentUser, emp, rec, securityPolicy)
+          }
           onBackToGrid={() =>
             applyNavigation({ route: 'monthly_grid', viewTab: 'grid', casePage: null })
           }
@@ -2758,8 +2885,6 @@ function AuthenticatedWorkspace({
           onEditCell={(emp, dateStr, rec) => {
             if (canRecordOrEditAttendance(currentUser, emp, rec, securityPolicy)) {
               setEditingCell({ employee: emp, date: dateStr, record: rec });
-            } else {
-              showToast('وضع القراءة فقط — ليس لديك صلاحية تعديل هذا السجل.', 'info');
             }
           }}
           onEditEmployee={(emp) => {
@@ -2890,14 +3015,10 @@ function AuthenticatedWorkspace({
                     <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 font-medium">
                       {lastSyncTime}
                     </span>
-                    {currentUser.role === 'supervisor' && (
-                      <>
-                        <span aria-hidden="true">·</span>
-                        <span className="font-bold text-indigo-600 dark:text-indigo-400">
-                          نطاق الفريق: {currentUser.teamId || 'غير معين'}
-                        </span>
-                      </>
-                    )}
+                    <span aria-hidden="true">·</span>
+                    <span className="font-bold text-indigo-600 dark:text-indigo-400">
+                      {roleWorkspace.monthlyGridTitleAr}
+                    </span>
                   </div>
                 </div>
 
@@ -2986,8 +3107,7 @@ function AuthenticatedWorkspace({
                     </button>
                   )}
 
-                  {(hasPermission(currentUser, 'integration.manage', securityPolicy) ||
-                    canExportReport) && (
+                  {canManageSync && (
                     <button
                       type="button"
                       onClick={() => setIsSyncModalOpen(true)}
@@ -3009,14 +3129,16 @@ function AuthenticatedWorkspace({
                     </button>
                   )}
 
-                  <button
-                    type="button"
-                    onClick={() => window.print()}
-                    className="border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold px-3 py-2 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap"
-                  >
-                    <Printer className="w-3.5 h-3.5 text-slate-600 dark:text-slate-400" />
-                    طباعة
-                  </button>
+                  {canPrintReport && (
+                    <button
+                      type="button"
+                      onClick={() => window.print()}
+                      className="border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold px-3 py-2 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap"
+                    >
+                      <Printer className="w-3.5 h-3.5 text-slate-600 dark:text-slate-400" />
+                      طباعة
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -3114,7 +3236,13 @@ function AuthenticatedWorkspace({
 
                 <button
                   type="button"
-                  onClick={() => navigateToRoute('analytics')}
+                  onClick={() => {
+                    if (canAccessRoute(currentUser, 'analytics', securityPolicy)) {
+                      navigateToRoute('analytics');
+                    } else {
+                      applyNavigation({ casePage: 'worked_only' });
+                    }
+                  }}
                   className="text-right px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800/60 hover:bg-indigo-50/70 dark:hover:bg-slate-800 border border-slate-200/80 dark:border-slate-800 hover:border-indigo-400 transition-colors cursor-pointer"
                 >
                   <span className="text-xs text-slate-500 dark:text-slate-400 block">
@@ -3401,18 +3529,30 @@ function AuthenticatedWorkspace({
                             </td>
 
                             <td className="p-2 text-center sticky-col-third bg-white dark:bg-slate-900 group-hover:bg-slate-50 dark:group-hover:bg-slate-800 border-l border-slate-200 dark:border-slate-800">
-                              <button
-                                type="button"
-                                disabled={!hasPermission(currentUser, 'employees.edit', securityPolicy)}
-                                onClick={() => handleToggleEmployeeStatus(emp.id)}
-                                className={`text-[11px] font-bold transition-colors whitespace-nowrap disabled:cursor-default ${
-                                  emp.status === 'active'
-                                    ? 'text-emerald-700 dark:text-emerald-400'
-                                    : 'text-rose-700 dark:text-rose-400'
-                                }`}
-                              >
-                                {emp.status === 'active' ? 'نشط' : 'موقوف'}
-                              </button>
+                              {canEditEmp ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleEmployeeStatus(emp.id)}
+                                  className={`text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                                    emp.status === 'active'
+                                      ? 'text-emerald-700 dark:text-emerald-400 hover:underline'
+                                      : 'text-rose-700 dark:text-rose-400 hover:underline'
+                                  }`}
+                                  title="تبديل حالة نشاط المندوب"
+                                >
+                                  {emp.status === 'active' ? 'نشط' : 'موقوف'}
+                                </button>
+                              ) : (
+                                <span
+                                  className={`text-[11px] font-bold whitespace-nowrap ${
+                                    emp.status === 'active'
+                                      ? 'text-emerald-700 dark:text-emerald-400'
+                                      : 'text-rose-700 dark:text-rose-400'
+                                  }`}
+                                >
+                                  {emp.status === 'active' ? 'نشط' : 'موقوف'}
+                                </span>
+                              )}
                             </td>
 
                             {monthDaysList.map((d) => {
@@ -3433,7 +3573,7 @@ function AuthenticatedWorkspace({
                                 <td
                                   key={d.dayNumber}
                                   onClick={() => {
-                                    if (editable || currentUser.role === 'supervisor') {
+                                    if (editable) {
                                       setEditingCell({
                                         employee: emp,
                                         date: d.dateStr,
@@ -3442,9 +3582,7 @@ function AuthenticatedWorkspace({
                                     }
                                   }}
                                   className={`p-0.5 text-center border-l border-slate-200 dark:border-slate-800 ${
-                                    editable || currentUser.role === 'supervisor'
-                                      ? 'cursor-pointer'
-                                      : 'cursor-default'
+                                    editable ? 'cursor-pointer' : 'cursor-default'
                                   }`}
                                   title={`${emp.fullName} | ${d.dateStr} | ${visual.title}${
                                     rec?.supervisorNotes
@@ -3557,23 +3695,24 @@ function AuthenticatedWorkspace({
         />
       )}
 
-      {employeeModalState.open && (
-        <EmployeeModal
-          currentUser={currentUser}
-          teams={teams}
-          existingEmployees={employees}
-          editingEmployee={employeeModalState.editingEmployee}
-          todayStr={todayStr}
-          canDeleteEmployee={canDeleteEmp}
-          onSave={handleSaveEmployee}
-          onDelete={handleDeleteEmployee}
-          onClose={() =>
-            setEmployeeModalState({ open: false, editingEmployee: null })
-          }
-        />
-      )}
+      {employeeModalState.open &&
+        (employeeModalState.editingEmployee ? canEditEmp : canCreateEmp) && (
+          <EmployeeModal
+            currentUser={currentUser}
+            teams={teams}
+            existingEmployees={employees}
+            editingEmployee={employeeModalState.editingEmployee}
+            todayStr={todayStr}
+            canDeleteEmployee={canDeleteEmp}
+            onSave={handleSaveEmployee}
+            onDelete={handleDeleteEmployee}
+            onClose={() =>
+              setEmployeeModalState({ open: false, editingEmployee: null })
+            }
+          />
+        )}
 
-      {isSyncModalOpen && (
+      {isSyncModalOpen && canManageSync && (
         <ImportSyncModal
           currentUser={currentUser}
           securityPolicy={securityPolicy}

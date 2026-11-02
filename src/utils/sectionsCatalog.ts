@@ -107,8 +107,18 @@ export function buildDrawerSectionGroups(params: {
     operationsItems.push({
       id: 'nav_home_overview',
       groupId: 'operations',
-      titleAr: 'الصفحة الرئيسية · ملخص البيانات العام',
-      subtitleAr: 'لوحة المؤشرات التفاعلية والرسوم التحليلية مع انتقال فوري للتفاصيل',
+      titleAr:
+        user.role === 'supervisor'
+          ? 'ملخص أداء وشفتات فريقي'
+          : user.role === 'viewer'
+          ? 'الملخص العام للأداء (قراءة فقط)'
+          : 'الصفحة الرئيسية · ملخص البيانات العام',
+      subtitleAr:
+        user.role === 'supervisor'
+          ? 'مؤشرات الحضور والساعات والخريطة الحية لأعضاء فريقك فقط'
+          : user.role === 'viewer'
+          ? 'استعراض المؤشرات التنفيذية والخريطة الحية دون أدوات تعديل'
+          : 'لوحة المؤشرات التفاعلية والرسوم التحليلية مع انتقال فوري للتفاصيل',
       iconKey: 'home_overview',
       kind: 'navigation',
       targetSnapshot: {
@@ -124,9 +134,18 @@ export function buildDrawerSectionGroups(params: {
     operationsItems.push({
       id: 'nav_live_monitoring',
       groupId: 'operations',
-      titleAr: 'المراقبة الحية للمناديب والتنبيهات الذكية (Live Map)',
+      titleAr:
+        user.role === 'supervisor'
+          ? 'الخريطة المباشرة لمندوبي فريقي'
+          : user.role === 'viewer'
+          ? 'الخريطة الحية للمناديب (قراءة فقط)'
+          : 'المراقبة الحية للمناديب والتنبيهات الذكية (Live Map)',
       subtitleAr:
-        'خريطة GPS مباشرة للمواقع والمحافظ والباتشات وترتيب الأولوية والتنبيهات',
+        user.role === 'supervisor'
+          ? 'متابعة مواقع مندوبي فريقك والمحافظ والتنبيهات الفورية'
+          : user.role === 'viewer'
+          ? 'عرض مباشر لمواقع المناديب وحالات التنبيهات المسجلة بالنظام'
+          : 'خريطة GPS مباشرة للمواقع والمحافظ والباتشات وترتيب الأولوية والتنبيهات',
       iconKey: 'live_map',
       kind: 'navigation',
       targetSnapshot: {
@@ -144,8 +163,18 @@ export function buildDrawerSectionGroups(params: {
     operationsItems.push({
       id: 'nav_dashboard_grid',
       groupId: 'operations',
-      titleAr: 'الجدول الشهري العام للشفتات',
-      subtitleAr: 'صفحة مستقلة لمتابعة حضور وانصراف وشفتات المندوبين يومياً',
+      titleAr:
+        user.role === 'supervisor'
+          ? 'جدول حضور وشفتات فريقي'
+          : user.role === 'viewer'
+          ? 'الجدول الشهري للشفتات (قراءة فقط)'
+          : 'الجدول الشهري العام للشفتات',
+      subtitleAr:
+        user.role === 'supervisor'
+          ? 'تسجيل الحضور اليومي والملاحظات الإشرافية لأعضاء فريقك'
+          : user.role === 'viewer'
+          ? 'استعراض سجلات الحضور والشفتات الشهرية بدون تعديل'
+          : 'صفحة مستقلة لمتابعة حضور وانصراف وشفتات المندوبين يومياً',
       iconKey: 'calendar_grid',
       kind: 'navigation',
       targetSnapshot: {
@@ -161,8 +190,14 @@ export function buildDrawerSectionGroups(params: {
     operationsItems.push({
       id: 'nav_dashboard_analytics',
       groupId: 'operations',
-      titleAr: 'ملخص الأداء والتقارير التحليلية',
-      subtitleAr: 'صفحة مستقلة لمؤشرات الالتزام وإجمالي الساعات وترتيب الأداء الشهري',
+      titleAr:
+        user.role === 'supervisor'
+          ? 'تقارير التزام وأداء فريقي'
+          : 'ملخص الأداء والتقارير التحليلية',
+      subtitleAr:
+        user.role === 'supervisor'
+          ? 'مؤشرات الالتزام وإجمالي الساعات وترتيب أداء أعضاء فريقك'
+          : 'صفحة مستقلة لمؤشرات الالتزام وإجمالي الساعات وترتيب الأداء الشهري',
       iconKey: 'analytics',
       kind: 'navigation',
       targetSnapshot: {
@@ -178,7 +213,7 @@ export function buildDrawerSectionGroups(params: {
       id: 'nav_my_portal',
       groupId: 'operations',
       titleAr: 'بوابتي الشخصية للشفتات والحضور',
-      subtitleAr: 'عرض جدولي الشخصي، ساعات العمل، وتقديم الطلبات السريعة',
+      subtitleAr: 'عرض جدولي الشخصي، ساعات العمل، ومشاركة موقعي المباشر',
       iconKey: 'my_portal',
       kind: 'navigation',
       targetSnapshot: {
@@ -193,8 +228,18 @@ export function buildDrawerSectionGroups(params: {
     operationsItems.push({
       id: 'nav_requests',
       groupId: 'operations',
-      titleAr: 'الطلبات والإجازات وتصحيح الحضور',
-      subtitleAr: 'إرسال ومراجعة واعتماد طلبات الإجازات والاعتراضات',
+      titleAr:
+        user.role === 'delivery_rep'
+          ? 'طلباتي الشخصية (الإجازات والتصحيحات)'
+          : user.role === 'supervisor'
+          ? 'طلبات وتوصيات أعضاء فريقي'
+          : 'الطلبات والإجازات وتصحيح الحضور',
+      subtitleAr:
+        user.role === 'delivery_rep'
+          ? 'تقديم طلب إجازة أو تصحيح شفت ومتابعة حالة اعتماده'
+          : user.role === 'supervisor'
+          ? 'مراجعة طلبات فريقك وإضافة توصيتك الإشرافية لمدير التشغيل'
+          : 'إرسال ومراجعة واعتماد طلبات الإجازات والاعتراضات',
       iconKey: 'requests',
       kind: 'navigation',
       targetSnapshot: {
@@ -211,8 +256,22 @@ export function buildDrawerSectionGroups(params: {
   if (operationsItems.length > 0) {
     groups.push({
       id: 'operations',
-      titleAr: 'التشغيل والجدول والمتابعة',
-      descriptionAr: 'الصفحات الأساسية لإدارة الشفتات والتقارير والطلبات',
+      titleAr:
+        user.role === 'delivery_rep'
+          ? 'بوابتك الشخصية والطلبات'
+          : user.role === 'supervisor'
+          ? 'متابعة وإشراف فريقي الميداني'
+          : user.role === 'viewer'
+          ? 'شاشات المراقبة والتقارير (قراءة فقط)'
+          : 'التشغيل والجدول والمتابعة',
+      descriptionAr:
+        user.role === 'delivery_rep'
+          ? 'شفتاتك اليومية، ساعات عملك، وطلباتك الشخصية فقط'
+          : user.role === 'supervisor'
+          ? 'الصفحات المخصصة لإشراف ومتابعة أعضاء فريقك فقط'
+          : user.role === 'viewer'
+          ? 'استعراض البيانات والمؤشرات المصرح بها دون تعديل'
+          : 'الصفحات الأساسية لإدارة الشفتات والتقارير والطلبات',
       items: operationsItems,
     });
   }
@@ -361,11 +420,20 @@ export function buildDrawerSectionGroups(params: {
     });
   } else {
     if (canAccessRoute(user, 'teams', policy)) {
+      const canManageTeams = hasPermission(user, 'teams.manage', policy);
       adminSecurityItems.push({
         id: 'nav_teams',
         groupId: 'administration_security',
-        titleAr: 'الفرق والمشرفون',
-        subtitleAr: 'متابعة فرق التوصيل وتوزيع المشرفين والمندوبين',
+        titleAr:
+          user.role === 'supervisor'
+            ? 'بطاقة وبيانات فريقي'
+            : canManageTeams
+            ? 'إدارة الفرق والمشرفين'
+            : 'فرق المندوبين (عرض)',
+        subtitleAr:
+          user.role === 'supervisor'
+            ? 'عرض أعضاء فريقك المعيّن لك وحالتهم التشغيلية'
+            : 'متابعة فرق التوصيل وتوزيع المشرفين والمندوبين',
         iconKey: 'teams',
         kind: 'navigation',
         targetSnapshot: {
@@ -381,8 +449,8 @@ export function buildDrawerSectionGroups(params: {
       adminSecurityItems.push({
         id: 'nav_users',
         groupId: 'administration_security',
-        titleAr: 'إدارة المستخدمين والحسابات',
-        subtitleAr: 'استعراض حسابات النظام والأدوار الوظيفية المعتمدة',
+        titleAr: 'دليل المستخدمين والحسابات (عرض فقط)',
+        subtitleAr: 'استعراض حسابات النظام والأدوار الوظيفية المعتمدة دون تعديل الصلاحيات',
         iconKey: 'users',
         kind: 'navigation',
         targetSnapshot: {
@@ -525,8 +593,14 @@ export function buildDrawerSectionGroups(params: {
 
   const canExport = hasPermission(user, 'reports.export', policy);
   const canManageIntegration = hasPermission(user, 'integration.manage', policy);
+  const canPrint =
+    canExport ||
+    (user.role !== 'delivery_rep' &&
+      user.role !== 'viewer' &&
+      (hasPermission(user, 'reports.view_all', policy) ||
+        hasPermission(user, 'reports.view_team', policy)));
 
-  if (canManageIntegration || canExport) {
+  if (canManageIntegration) {
     quickToolsItems.push({
       id: 'act_sync_json',
       groupId: 'quick_tools',
@@ -550,15 +624,17 @@ export function buildDrawerSectionGroups(params: {
     });
   }
 
-  quickToolsItems.push({
-    id: 'act_print',
-    groupId: 'quick_tools',
-    titleAr: 'طباعة العرض الحالي',
-    subtitleAr: 'تجهيز الصفحة الحالية للطباعة الفورية بتنسيق نظيف',
-    iconKey: 'tool_print',
-    kind: 'action',
-    actionId: 'print_page',
-  });
+  if (canPrint) {
+    quickToolsItems.push({
+      id: 'act_print',
+      groupId: 'quick_tools',
+      titleAr: 'طباعة العرض الحالي',
+      subtitleAr: 'تجهيز الصفحة الحالية للطباعة الفورية بتنسيق نظيف',
+      iconKey: 'tool_print',
+      kind: 'action',
+      actionId: 'print_page',
+    });
+  }
 
   quickToolsItems.push({
     id: 'act_toggle_theme',
@@ -585,8 +661,14 @@ export function buildDrawerSectionGroups(params: {
 
   groups.push({
     id: 'quick_tools',
-    titleAr: 'الأدوات السريعة وإجراءات الجلسة',
-    descriptionAr: 'عمليات مباشرة للتصدير والمزامنة والطباعة والمظهر',
+    titleAr:
+      user.role === 'delivery_rep' || (!canExport && !canManageIntegration && !canPrint)
+        ? 'المظهر وإجراءات الجلسة'
+        : 'الأدوات السريعة وإجراءات الجلسة',
+    descriptionAr:
+      user.role === 'delivery_rep' || (!canExport && !canManageIntegration && !canPrint)
+        ? 'تخصيص المظهر وتسجيل الخروج الآمن من حسابك'
+        : 'الأدوات المصرح لدورك استخدامها فقط',
     items: quickToolsItems,
   });
 

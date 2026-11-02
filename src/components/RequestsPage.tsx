@@ -21,6 +21,7 @@ import {
   hasPermission,
   ROLE_SHORT_LABELS_AR,
 } from '../utils/rbac';
+import { buildRoleWorkspaceConfig } from '../utils/roleWorkspaces';
 import {
   decideWorkflowRequest,
   recommendWorkflowRequestBySupervisor,
@@ -201,19 +202,24 @@ export const RequestsPage: React.FC<RequestsPageProps> = ({
     }
   };
 
+  const roleWorkspace = useMemo(
+    () => buildRoleWorkspaceConfig(currentUser, securityPolicy),
+    [currentUser, securityPolicy]
+  );
+
   return (
     <main className="flex-1 p-4 sm:p-6 max-w-[1900px] w-full mx-auto space-y-5">
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2 text-indigo-600 dark:text-indigo-400 text-xs font-bold mb-1">
             <FileCheck2 className="w-4 h-4" />
-            دورة الاعتماد الرسمية (Approval Workflow)
+            <span>{roleWorkspace.scopeBadgeAr}</span>
           </div>
           <h1 className="text-lg font-extrabold text-slate-900 dark:text-white">
-            طلبات الإجازات وتصحيح الحضور والشفتات
+            {roleWorkspace.requestsTitleAr}
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            لا يتم تعديل سجلات الحضور بناءً على الطلبات إلا بعد اعتماد رسمي من مدير التشغيل أو مدير النظام، ولا يمكن لأي مستخدم اعتماد طلبه الشخصي.
+            {roleWorkspace.requestsSubtitleAr}
           </p>
         </div>
 

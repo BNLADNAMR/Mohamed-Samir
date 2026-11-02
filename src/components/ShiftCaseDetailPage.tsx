@@ -42,6 +42,8 @@ interface ShiftCaseDetailPageProps {
   onSwitchPage: (page: ShiftCasePageType) => void;
   onEditCell: (emp: Employee, dateStr: string, rec?: AttendanceRecord) => void;
   onEditEmployee: (emp: Employee) => void;
+  canEditEmp?: boolean;
+  canEditAttendanceForEmp?: (emp: Employee, rec?: AttendanceRecord) => boolean;
 }
 
 const PAGE_CONFIG: Record<
@@ -103,6 +105,8 @@ export const ShiftCaseDetailPage: React.FC<ShiftCaseDetailPageProps> = ({
   onSwitchPage,
   onEditCell,
   onEditEmployee,
+  canEditEmp = false,
+  canEditAttendanceForEmp,
 }) => {
   const [localSearch, setLocalSearch] = useState('');
   const config = PAGE_CONFIG[pageType];
@@ -359,14 +363,26 @@ export const ShiftCaseDetailPage: React.FC<ShiftCaseDetailPageProps> = ({
                   ? absentDates
                   : workedDates;
 
+              const canRecordAnyForEmp = canEditAttendanceForEmp
+                ? canEditAttendanceForEmp(emp)
+                : false;
+
               const daysSectionTitle =
                 pageType === 'selected_not_worked'
-                  ? `الأيام التي اختار فيها الشفت ولم يعمل (${missedShiftDates.length} يوم) — انقر لتعديل اليوم:`
+                  ? canRecordAnyForEmp
+                    ? `الأيام التي اختار فيها الشفت ولم يعمل (${missedShiftDates.length} يوم) — انقر لتعديل اليوم:`
+                    : `الأيام التي اختار فيها الشفت ولم يعمل (${missedShiftDates.length} يوم):`
                   : pageType === 'incomplete_schedule'
-                  ? `الأيام المتبقية بدون اختيار شفت (${unscheduledDates.length} من ${daysInMonth} يوم) — انقر للجدولة:`
+                  ? canRecordAnyForEmp
+                    ? `الأيام المتبقية بدون اختيار شفت (${unscheduledDates.length} من ${daysInMonth} يوم) — انقر للتسجيل:`
+                    : `الأيام المتبقية بدون اختيار شفت (${unscheduledDates.length} من ${daysInMonth} يوم):`
                   : pageType === 'absent_only'
-                  ? `تواريخ أيام الغياب (${absentDates.length} يوم) — انقر للمراجعة:`
-                  : `تواريخ أيام الحضور الفعلي (${workedDates.length} يوم) — انقر لعرض الساعات:`;
+                  ? canRecordAnyForEmp
+                    ? `تواريخ أيام الغياب (${absentDates.length} يوم) — انقر للمراجعة:`
+                    : `تواريخ أيام الغياب المسجلة (${absentDates.length} يوم):`
+                  : canRecordAnyForEmp
+                  ? `تواريخ أيام الحضور الفعلي (${workedDates.length} يوم) — انقر للتحديث:`
+                  : `تواريخ أيام الحضور الفعلي (${workedDates.length} يوم):`;
 
               return (
                 <div
@@ -408,14 +424,16 @@ export const ShiftCaseDetailPage: React.FC<ShiftCaseDetailPageProps> = ({
                         </div>
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={() => onEditEmployee(emp)}
-                        className="p-2 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
-                        title="تعديل ملف المندوب"
-                      >
-                        <Edit3 className="w-4 h-4" />
-                      </button>
+                      {canEditEmp && (
+                        <button
+                          type="button"
+                          onClick={() => onEditEmployee(emp)}
+                          className="p-2 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+                          title="تعديل ملف المندوب"
+                        >
+                          <Edit3 className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
 
                     {/* شريط أرقام المندوب المبسط */}
@@ -469,24 +487,49 @@ export const ShiftCaseDetailPage: React.FC<ShiftCaseDetailPageProps> = ({
 
                       {targetDays.length === 0 ? (
                         <p className="text-xs text-slate-400 dark:text-slate-500">
-                          لا توجد أيام مسجلة في هذا البند حالياً — انقر على أي يوم بالجدول لتسجيله.
+                          {canRecordAnyForEmp
+                            ? 'لا توجد أيام مسجلة في هذا البند حالياً — انقر على أي يوم بالجدول لتسجيله.'
+                            : 'لا توجد أيام مسجلة في هذا البند حالياً.'}
                         </p>
                       ) : (
                         <div className="flex flex-wrap gap-1.5">
                           {targetDays.slice(0, 18).map((d) => {
                             const rec = attendanceRecords[`${emp.id}_${d.dateStr}`];
+                            const canEditThisDay = canEditAttendanceForEmp
+                              ? canEditAttendanceForEmp(emp, rec)
+                              : false;
+                            const chipColorClass =
+                              pageType === 'selected_not_worked' || pageType === 'absent_only'
+                                ? 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-300'
+                                : pageType === 'incomplete_schedule'
+                                ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-300'
+                                : 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-900 text-emerald-800 dark:text-emerald-300';
+
+                            if (!canEditThisDay) {
+                              return (
+                                <span
+                                  key={d.dateStr}
+                                  className={`px-2.5 py-1 rounded-md border text-[11px] font-mono tabular-nums flex items-center gap-1 ${chipColorClass}`}
+                                >
+                                  <Calendar className="w-3 h-3 opacity-70" />
+                                  <span>
+                                    {d.dayName} {d.dayNumber}
+                                  </span>
+                                  {rec?.attendance === 'worked' && (
+                                    <span className="opacity-80">
+                                      ({Number(((rec.totalWorkedMinutes || 0) / 60).toFixed(1))}س)
+                                    </span>
+                                  )}
+                                </span>
+                              );
+                            }
+
                             return (
                               <button
                                 key={d.dateStr}
                                 type="button"
                                 onClick={() => onEditCell(emp, d.dateStr, rec)}
-                                className={`px-2.5 py-1 rounded-md border text-[11px] font-mono tabular-nums transition-colors flex items-center gap-1 ${
-                                  pageType === 'selected_not_worked' || pageType === 'absent_only'
-                                    ? 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/70'
-                                    : pageType === 'incomplete_schedule'
-                                    ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60'
-                                    : 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-900 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/60'
-                                }`}
+                                className={`px-2.5 py-1 rounded-md border text-[11px] font-mono tabular-nums transition-colors flex items-center gap-1 cursor-pointer hover:opacity-85 ${chipColorClass}`}
                                 title={`انقر لتعديل سجل يوم ${d.dateStr}`}
                               >
                                 <Calendar className="w-3 h-3 opacity-70" />
