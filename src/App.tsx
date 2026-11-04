@@ -30,7 +30,13 @@ import {
   query,
   where,
 } from 'firebase/firestore';
-import { auth, db, isBenignAbortError } from './firebase';
+import {
+  auth,
+  db,
+  handleFirestoreError,
+  isBenignAbortError,
+  OperationType,
+} from './firebase';
 import {
   AppRoutePage,
   AttendanceRecord,
@@ -120,6 +126,10 @@ import {
   pushNavigationSnapshot,
   resolveBackStep,
 } from './utils/navigationHistory';
+import {
+  popTopOverlayBackHandler,
+  useAndroidHardwareBackButton,
+} from './utils/androidBackBridge';
 import { AppSectionsDrawer } from './components/AppSectionsDrawer';
 import { DrawerQuickActionId } from './utils/sectionsCatalog';
 import { LiveMonitoringDashboard } from './components/LiveMonitoringDashboard';
@@ -487,12 +497,25 @@ function AuthenticatedWorkspace({
     let isUnmounted = false;
     const unsubs: (() => void)[] = [];
 
-    const handleListenerError = (label: string) => (err: unknown) => {
-      if (isUnmounted || isBenignAbortError(err) || !auth.currentUser) {
-        return;
-      }
-      console.warn(label, err);
-    };
+    const handleListenerError =
+      (collectionPath: string) => (err: unknown) => {
+        if (isUnmounted || isBenignAbortError(err) || !auth.currentUser) {
+          return;
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        if (
+          msg.includes('Missing or insufficient permissions') ||
+          msg.includes('permission-denied')
+        ) {
+          try {
+            handleFirestoreError(err, OperationType.LIST, collectionPath);
+          } catch {
+            // تم توثيق خطأ الصلاحيات القياسي في السجل دون إسقاط الواجهة
+          }
+          return;
+        }
+        console.warn(`Firestore listener warning [${collectionPath}]:`, err);
+      };
 
     // 1. المندوبون (Employees)
     if (
@@ -530,7 +553,7 @@ function AuthenticatedWorkspace({
               })
             );
           },
-          handleListenerError('Employees listener warning:')
+          handleListenerError('employees')
         )
       );
     } else if (currentUser.role === 'supervisor') {
@@ -560,7 +583,7 @@ function AuthenticatedWorkspace({
               setEmployees(list);
               setIsInitialCloudLoaded(true);
             },
-            handleListenerError('Team employees listener warning:')
+            handleListenerError('employees')
           )
         );
       } else {
@@ -594,7 +617,7 @@ function AuthenticatedWorkspace({
               }
               setIsInitialCloudLoaded(true);
             },
-            handleListenerError('Self employee listener warning:')
+            handleListenerError(`employees/${currentUser.employeeId}`)
           )
         );
       } else {
@@ -641,7 +664,7 @@ function AuthenticatedWorkspace({
         onSnapshot(
           collection(db, 'attendance'),
           (snap) => parseAttendanceSnap(snap.docs),
-          handleListenerError('Attendance listener warning:')
+          handleListenerError('attendance')
         )
       );
     } else if (currentUser.role === 'supervisor' && currentUser.teamId) {
@@ -652,7 +675,7 @@ function AuthenticatedWorkspace({
             where('teamId', '==', currentUser.teamId)
           ),
           (snap) => parseAttendanceSnap(snap.docs),
-          handleListenerError('Team attendance listener warning:')
+          handleListenerError('attendance')
         )
       );
     } else if (currentUser.role === 'delivery_rep' && currentUser.employeeId) {
@@ -663,7 +686,7 @@ function AuthenticatedWorkspace({
             where('employeeId', '==', currentUser.employeeId)
           ),
           (snap) => parseAttendanceSnap(snap.docs),
-          handleListenerError('Rep attendance listener warning:')
+          handleListenerError('attendance')
         )
       );
     }
@@ -693,7 +716,7 @@ function AuthenticatedWorkspace({
               })
             );
           },
-          () => {}
+          handleListenerError('teams')
         )
       );
     } else if (currentUser.role === 'supervisor' && currentUser.teamId) {
@@ -719,40 +742,42 @@ function AuthenticatedWorkspace({
               })
             );
           },
-          () => {}
+          handleListenerError('teams')
         )
       );
     }
 
-    // 4. طلبات الإجازات والتصحيح (Requests)
+    // 4. طلبات الإجازات والتصحيح (Requests) مرتبة تنازلياً بالأحدث
     const parseRequestsSnap = (docs: { id: string; data: () => Record<string, unknown> }[]) => {
-      setRequests(
-        docs.map((d) => {
-          const raw = d.data();
-          return {
-            requestId: String(raw.requestId || d.id),
-            employeeId: String(raw.employeeId || ''),
-            employeeName: String(raw.employeeName || ''),
-            teamId: String(raw.teamId || ''),
-            submittedBy: String(raw.submittedBy || ''),
-            submitterRole: (raw.submitterRole as WorkflowRequest['submitterRole']) || 'delivery_rep',
-            requestType: (raw.requestType as WorkflowRequest['requestType']) || 'leave',
-            requestDate: String(raw.requestDate || ''),
-            proposedStartTime: String(raw.proposedStartTime || ''),
-            proposedEndTime: String(raw.proposedEndTime || ''),
-            description: String(raw.description || ''),
-            evidenceUrl: String(raw.evidenceUrl || ''),
-            status: (raw.status as WorkflowRequest['status']) || 'pending',
-            supervisorRecommendation: String(raw.supervisorRecommendation || ''),
-            reviewedBy: String(raw.reviewedBy || ''),
-            reviewerName: String(raw.reviewerName || ''),
-            reviewComment: String(raw.reviewComment || ''),
-            reviewedAt: formatFirestoreTimestamp(raw.reviewedAt),
-            createdAt: formatFirestoreTimestamp(raw.createdAt),
-            updatedAt: formatFirestoreTimestamp(raw.updatedAt),
-          };
-        })
+      const parsedList = docs.map((d) => {
+        const raw = d.data();
+        return {
+          requestId: String(raw.requestId || d.id),
+          employeeId: String(raw.employeeId || ''),
+          employeeName: String(raw.employeeName || ''),
+          teamId: String(raw.teamId || ''),
+          submittedBy: String(raw.submittedBy || ''),
+          submitterRole: (raw.submitterRole as WorkflowRequest['submitterRole']) || 'delivery_rep',
+          requestType: (raw.requestType as WorkflowRequest['requestType']) || 'leave',
+          requestDate: String(raw.requestDate || ''),
+          proposedStartTime: String(raw.proposedStartTime || ''),
+          proposedEndTime: String(raw.proposedEndTime || ''),
+          description: String(raw.description || ''),
+          evidenceUrl: String(raw.evidenceUrl || ''),
+          status: (raw.status as WorkflowRequest['status']) || 'pending',
+          supervisorRecommendation: String(raw.supervisorRecommendation || ''),
+          reviewedBy: String(raw.reviewedBy || ''),
+          reviewerName: String(raw.reviewerName || ''),
+          reviewComment: String(raw.reviewComment || ''),
+          reviewedAt: formatFirestoreTimestamp(raw.reviewedAt),
+          createdAt: formatFirestoreTimestamp(raw.createdAt),
+          updatedAt: formatFirestoreTimestamp(raw.updatedAt),
+        };
+      });
+      parsedList.sort((a, b) =>
+        (b.createdAt || b.requestDate).localeCompare(a.createdAt || a.requestDate)
       );
+      setRequests(parsedList);
     };
 
     if (
@@ -763,7 +788,7 @@ function AuthenticatedWorkspace({
         onSnapshot(
           collection(db, 'requests'),
           (snap) => parseRequestsSnap(snap.docs),
-          () => {}
+          handleListenerError('requests')
         )
       );
     } else if (currentUser.role === 'supervisor' && currentUser.teamId) {
@@ -774,7 +799,7 @@ function AuthenticatedWorkspace({
             where('teamId', '==', currentUser.teamId)
           ),
           (snap) => parseRequestsSnap(snap.docs),
-          () => {}
+          handleListenerError('requests')
         )
       );
     } else if (currentUser.role === 'delivery_rep' && currentUser.employeeId) {
@@ -785,7 +810,7 @@ function AuthenticatedWorkspace({
             where('employeeId', '==', currentUser.employeeId)
           ),
           (snap) => parseRequestsSnap(snap.docs),
-          () => {}
+          handleListenerError('requests')
         )
       );
     }
@@ -800,7 +825,7 @@ function AuthenticatedWorkspace({
               snap.docs.map((d) => parseUserProfileDoc(d.id, d.data()))
             );
           },
-          () => {}
+          handleListenerError('users')
         )
       );
     } else {
@@ -836,42 +861,49 @@ function AuthenticatedWorkspace({
               })
             );
           },
-          () => {}
+          handleListenerError('preprovisionedUsers')
         )
       );
     }
 
-    // 6. سجل العمليات الأمنية والتشغيلية (Audit Logs)
+    // 6. سجل العمليات الأمنية والتشغيلية (Audit Logs) مرتباً تنازلياً بالوقت
+    const parseAuditDocs = (
+      docs: { id: string; data: () => Record<string, unknown> }[],
+      forcedCategory?: 'operational'
+    ): AuditLogItem[] => {
+      const items: AuditLogItem[] = docs.map((d) => {
+        const raw = d.data();
+        return {
+          logId: String(raw.logId || d.id),
+          actorUserId: String(raw.actorUserId || ''),
+          actorName: String(raw.actorName || ''),
+          actorRole: (raw.actorRole as typeof currentUser.role) || 'viewer',
+          category:
+            forcedCategory ||
+            (raw.category === 'security' ? 'security' : 'operational'),
+          action: String(raw.action || ''),
+          targetType: String(raw.targetType || ''),
+          targetId: String(raw.targetId || ''),
+          beforeSummary: String(raw.beforeSummary || ''),
+          afterSummary: String(raw.afterSummary || ''),
+          reason: String(raw.reason || ''),
+          result:
+            raw.result === 'denied' || raw.result === 'failure'
+              ? raw.result
+              : 'success',
+          timestamp: formatFirestoreTimestamp(raw.timestamp),
+        };
+      });
+      items.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+      return items;
+    };
+
     if (currentUser.role === 'super_admin') {
       unsubs.push(
         onSnapshot(
           collection(db, 'auditLogs'),
-          (snap) => {
-            setAuditLogs(
-              snap.docs.map((d) => {
-                const raw = d.data();
-                return {
-                  logId: String(raw.logId || d.id),
-                  actorUserId: String(raw.actorUserId || ''),
-                  actorName: String(raw.actorName || ''),
-                  actorRole: (raw.actorRole as typeof currentUser.role) || 'viewer',
-                  category: raw.category === 'security' ? 'security' : 'operational',
-                  action: String(raw.action || ''),
-                  targetType: String(raw.targetType || ''),
-                  targetId: String(raw.targetId || ''),
-                  beforeSummary: String(raw.beforeSummary || ''),
-                  afterSummary: String(raw.afterSummary || ''),
-                  reason: String(raw.reason || ''),
-                  result:
-                    raw.result === 'denied' || raw.result === 'failure'
-                      ? raw.result
-                      : 'success',
-                  timestamp: formatFirestoreTimestamp(raw.timestamp),
-                };
-              })
-            );
-          },
-          () => {}
+          (snap) => setAuditLogs(parseAuditDocs(snap.docs)),
+          handleListenerError('auditLogs')
         )
       );
     } else if (canReadOperationalAuditLogs) {
@@ -881,32 +913,8 @@ function AuthenticatedWorkspace({
             collection(db, 'auditLogs'),
             where('category', '==', 'operational')
           ),
-          (snap) => {
-            setAuditLogs(
-              snap.docs.map((d) => {
-                const raw = d.data();
-                return {
-                  logId: String(raw.logId || d.id),
-                  actorUserId: String(raw.actorUserId || ''),
-                  actorName: String(raw.actorName || ''),
-                  actorRole: (raw.actorRole as typeof currentUser.role) || 'viewer',
-                  category: 'operational',
-                  action: String(raw.action || ''),
-                  targetType: String(raw.targetType || ''),
-                  targetId: String(raw.targetId || ''),
-                  beforeSummary: String(raw.beforeSummary || ''),
-                  afterSummary: String(raw.afterSummary || ''),
-                  reason: String(raw.reason || ''),
-                  result:
-                    raw.result === 'denied' || raw.result === 'failure'
-                      ? raw.result
-                      : 'success',
-                  timestamp: formatFirestoreTimestamp(raw.timestamp),
-                };
-              })
-            );
-          },
-          () => {}
+          (snap) => setAuditLogs(parseAuditDocs(snap.docs, 'operational')),
+          handleListenerError('auditLogs')
         )
       );
     } else {
@@ -921,33 +929,8 @@ function AuthenticatedWorkspace({
             collection(db, 'auditLogs'),
             where('actorUserId', '==', currentUser.uid)
           ),
-          (snap) => {
-            setMyAccountAuditLogs(
-              snap.docs.map((d) => {
-                const raw = d.data();
-                return {
-                  logId: String(raw.logId || d.id),
-                  actorUserId: String(raw.actorUserId || ''),
-                  actorName: String(raw.actorName || ''),
-                  actorRole:
-                    (raw.actorRole as typeof currentUser.role) || currentUser.role,
-                  category: raw.category === 'security' ? 'security' : 'operational',
-                  action: String(raw.action || ''),
-                  targetType: String(raw.targetType || ''),
-                  targetId: String(raw.targetId || ''),
-                  beforeSummary: String(raw.beforeSummary || ''),
-                  afterSummary: String(raw.afterSummary || ''),
-                  reason: String(raw.reason || ''),
-                  result:
-                    raw.result === 'denied' || raw.result === 'failure'
-                      ? raw.result
-                      : 'success',
-                  timestamp: formatFirestoreTimestamp(raw.timestamp),
-                };
-              })
-            );
-          },
-          () => {}
+          (snap) => setMyAccountAuditLogs(parseAuditDocs(snap.docs)),
+          handleListenerError('auditLogs')
         )
       );
     }
@@ -990,7 +973,7 @@ function AuthenticatedWorkspace({
             setLiveTelemetryMap(nextMap);
             setLiveClockMs(Date.now());
           },
-          handleListenerError('Live locations listener warning:')
+          handleListenerError('repLiveLocations')
         )
       );
     } else if (currentUser.role === 'supervisor' && currentUser.teamId) {
@@ -1009,7 +992,7 @@ function AuthenticatedWorkspace({
             setLiveTelemetryMap(nextMap);
             setLiveClockMs(Date.now());
           },
-          handleListenerError('Team live locations listener warning:')
+          handleListenerError('repLiveLocations')
         )
       );
     } else if (currentUser.role === 'delivery_rep' && currentUser.employeeId) {
@@ -1024,45 +1007,45 @@ function AuthenticatedWorkspace({
               setLiveTelemetryMap({});
             }
           },
-          handleListenerError('Rep live location listener warning:')
+          handleListenerError(`repLiveLocations/${currentUser.employeeId}`)
         )
       );
     }
 
-    // 9. السجل التاريخي للتنبيهات الذكية للمناديب (repAlertLogs)
+    // 9. السجل التاريخي للتنبيهات الذكية للمناديب (repAlertLogs) مرتباً بالأحدث
     const parseAlertLogsSnap = (
       docs: { id: string; data: () => Record<string, unknown> }[]
     ) => {
-      setRepAlertLogs(
-        docs.map((d) => {
-          const raw = d.data();
-          return {
-            alertId: String(raw.alertId || d.id),
-            employeeId: String(raw.employeeId || ''),
-            employeeCode: String(raw.employeeCode || ''),
-            employeeName: String(raw.employeeName || ''),
-            teamId: String(raw.teamId || ''),
-            severity: raw.severity === 'red' ? 'red' : 'orange',
-            alertType:
-              raw.alertType === 'performance_red' ||
-              raw.alertType === 'wallet_batch_456' ||
-              raw.alertType === 'wallet_batch_123'
-                ? raw.alertType
-                : 'wallet_batch_123',
-            reason: String(raw.reason || ''),
-            batch: isValidRepBatch(raw.batch) ? raw.batch : 'Batch 1',
-            walletBalance: Number(raw.walletBalance) || 0,
-            performanceRate: Number(raw.performanceRate ?? -1),
-            status: raw.status === 'resolved' ? 'resolved' : 'active',
-            resolvedReason: String(raw.resolvedReason || ''),
-            triggeredAtMs: Number(raw.triggeredAtMs) || 0,
-            resolvedAtMs: Number(raw.resolvedAtMs) || 0,
-            recordedBy: String(raw.recordedBy || ''),
-            createdAt: formatFirestoreTimestamp(raw.createdAt),
-            updatedAt: formatFirestoreTimestamp(raw.updatedAt),
-          };
-        })
-      );
+      const parsedAlerts = docs.map((d) => {
+        const raw = d.data();
+        return {
+          alertId: String(raw.alertId || d.id),
+          employeeId: String(raw.employeeId || ''),
+          employeeCode: String(raw.employeeCode || ''),
+          employeeName: String(raw.employeeName || ''),
+          teamId: String(raw.teamId || ''),
+          severity: raw.severity === 'red' ? 'red' : 'orange',
+          alertType:
+            raw.alertType === 'performance_red' ||
+            raw.alertType === 'wallet_batch_456' ||
+            raw.alertType === 'wallet_batch_123'
+              ? raw.alertType
+              : 'wallet_batch_123',
+          reason: String(raw.reason || ''),
+          batch: isValidRepBatch(raw.batch) ? raw.batch : 'Batch 1',
+          walletBalance: Number(raw.walletBalance) || 0,
+          performanceRate: Number(raw.performanceRate ?? -1),
+          status: raw.status === 'resolved' ? 'resolved' : 'active',
+          resolvedReason: String(raw.resolvedReason || ''),
+          triggeredAtMs: Number(raw.triggeredAtMs) || 0,
+          resolvedAtMs: Number(raw.resolvedAtMs) || 0,
+          recordedBy: String(raw.recordedBy || ''),
+          createdAt: formatFirestoreTimestamp(raw.createdAt),
+          updatedAt: formatFirestoreTimestamp(raw.updatedAt),
+        } as RepAlertLogRecord;
+      });
+      parsedAlerts.sort((a, b) => b.triggeredAtMs - a.triggeredAtMs);
+      setRepAlertLogs(parsedAlerts);
     };
 
     if (
@@ -1074,7 +1057,7 @@ function AuthenticatedWorkspace({
         onSnapshot(
           collection(db, 'repAlertLogs'),
           (snap) => parseAlertLogsSnap(snap.docs),
-          handleListenerError('Rep alert logs listener warning:')
+          handleListenerError('repAlertLogs')
         )
       );
     } else if (currentUser.role === 'supervisor' && currentUser.teamId) {
@@ -1085,7 +1068,7 @@ function AuthenticatedWorkspace({
             where('teamId', '==', currentUser.teamId)
           ),
           (snap) => parseAlertLogsSnap(snap.docs),
-          handleListenerError('Team rep alert logs listener warning:')
+          handleListenerError('repAlertLogs')
         )
       );
     } else if (currentUser.role === 'delivery_rep' && currentUser.employeeId) {
@@ -1096,7 +1079,7 @@ function AuthenticatedWorkspace({
             where('employeeId', '==', currentUser.employeeId)
           ),
           (snap) => parseAlertLogsSnap(snap.docs),
-          handleListenerError('Self rep alert logs listener warning:')
+          handleListenerError('repAlertLogs')
         )
       );
     }
@@ -2177,23 +2160,30 @@ function AuthenticatedWorkspace({
     activeCasePage === null &&
     !(isSuperAdminInSecurityHub && securityHubTab !== 'overview');
 
-  const handleGlobalBack = useCallback(() => {
-    // 1. إغلاق القائمة الجانبية أو أي نافذة منبثقة مفتوحة أولاً
+  const performBackStep = useCallback((): boolean => {
+    // 1. إغلاق أي نافذة فرعية مسجلة في مكدس النوافذ أو القوائم الجانبية أولاً
+    if (popTopOverlayBackHandler()) {
+      return true;
+    }
     if (isSectionsDrawerOpen) {
       setIsSectionsDrawerOpen(false);
-      return;
+      return true;
     }
     if (editingCell) {
       setEditingCell(null);
-      return;
+      return true;
     }
     if (employeeModalState.open) {
       setEmployeeModalState({ open: false, editingEmployee: null });
-      return;
+      return true;
     }
     if (isSyncModalOpen) {
       setIsSyncModalOpen(false);
-      return;
+      return true;
+    }
+    if (confirmClearAll) {
+      setConfirmClearAll(false);
+      return true;
     }
 
     // 2. الرجوع خطوة للخلف عبر سجل الصفحات والتبويبات أو الصفحة الأب
@@ -2218,7 +2208,7 @@ function AuthenticatedWorkspace({
           `#${resolution.nextSnapshot.route}`
         );
       }
-      return;
+      return true;
     }
 
     // 3. عند التواجد في الصفحة الرئيسية مع وجود فلاتر أو شهر مختلف، نرجع للعرض الافتراضي
@@ -2232,22 +2222,23 @@ function AuthenticatedWorkspace({
       setFilterSelection('all');
       setFilterAttendance('all');
       showToast('تم الرجوع للخلف وإلغاء الفلاتر النشطة.', 'info');
-      return;
+      return true;
     }
 
     if (!isCurrentMonthView) {
       setCurrentYear(today.getFullYear());
       setCurrentMonth(today.getMonth() + 1);
       showToast('تم الرجوع إلى عرض الشهر الحالي.', 'info');
-      return;
+      return true;
     }
 
-    showToast('أنت حالياً في الصفحة الرئيسية الأساسية للنظام.', 'info');
+    return false;
   }, [
     isSectionsDrawerOpen,
     editingCell,
     employeeModalState.open,
     isSyncModalOpen,
+    confirmClearAll,
     navHistory,
     currentNavSnapshot,
     defaultRoute,
@@ -2259,6 +2250,20 @@ function AuthenticatedWorkspace({
     today,
     showToast,
   ]);
+
+  const handleGlobalBack = useCallback(() => {
+    if (performBackStep()) {
+      return;
+    }
+    showToast('أنت حالياً في الصفحة الرئيسية الأساسية للنظام.', 'info');
+  }, [performBackStep, showToast]);
+
+  // دعم زر الرجوع الفعلي في أجهزة أندرويد (يغلق النوافذ أولاً ثم يرجع للشاشة السابقة ويمنع الخروج المفاجئ)
+  useAndroidHardwareBackButton({
+    onStepBackOrCloseOverlay: performBackStep,
+    onShowExitConfirmHint: () =>
+      showToast('اضغط زر الرجوع مرة أخرى للخروج من التطبيق.', 'info'),
+  });
 
   const handleDrawerQuickAction = (actionId: DrawerQuickActionId) => {
     switch (actionId) {
@@ -3719,16 +3724,41 @@ function AuthenticatedWorkspace({
           employees={employees}
           attendanceRecords={attendanceRecords}
           lastSyncTime={lastSyncTime}
-          onImportData={async (newEmps, newAtt, isExt) => {
+          onImportData={async (
+            newEmps,
+            newAtt,
+            isExt,
+            telemetryUpdates,
+            customSourceLabel
+          ) => {
             await migrateLocalDataToFirestore({
               actor: currentUser,
               employees: newEmps,
               attendanceRecords: newAtt,
-              sourceLabel: isExt
-                ? 'مزامنة بيانات الشفتات من النظام الخارجي'
-                : 'استيراد نسخة احتياطية JSON',
+              sourceLabel:
+                customSourceLabel ||
+                (isExt
+                  ? 'مزامنة بيانات الشفتات من النظام الخارجي'
+                  : 'استيراد نسخة احتياطية JSON'),
               markAsExternalSync: isExt,
             });
+
+            if (telemetryUpdates && telemetryUpdates.length > 0) {
+              const empById = new Map(newEmps.map((e) => [e.id, e]));
+              for (const tel of telemetryUpdates) {
+                const targetEmp = empById.get(tel.employeeId);
+                if (!targetEmp) continue;
+                const existingTel = liveTelemetryMap[tel.employeeId];
+                await upsertRepLiveTelemetry({
+                  actor: currentUser,
+                  employee: targetEmp,
+                  batch: tel.batch,
+                  walletBalance: tel.walletBalance,
+                  isOnline: tel.isOnline ?? existingTel?.isOnline ?? false,
+                  recordAudit: false,
+                });
+              }
+            }
           }}
           onSyncComplete={(msg) => {
             setLastSyncTime(

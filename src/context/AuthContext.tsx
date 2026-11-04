@@ -8,6 +8,8 @@ import React, {
 } from 'react';
 import {
   EmailAuthProvider,
+  getRedirectResult,
+  GoogleAuthProvider,
   linkWithCredential,
   onAuthStateChanged,
   reauthenticateWithCredential,
@@ -16,6 +18,7 @@ import {
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   updatePassword,
   updateProfile,
@@ -31,12 +34,16 @@ import {
 } from 'firebase/firestore';
 import {
   auth,
+  clearCachedGoogleAccessToken,
   db,
+  getCachedGoogleAccessToken,
   googleProvider,
   handleFirestoreError,
   isBenignAbortError,
   normalizeEmailToKey,
   OperationType,
+  requestGoogleSheetsAccessToken,
+  setCachedGoogleAccessToken,
   validateFirestoreConnection,
 } from '../firebase';
 import {
@@ -96,6 +103,9 @@ export interface AuthContextValue {
     settings: AccountSecurityUpdateInput,
     currentPasswordForReauth?: string
   ) => Promise<void>;
+  hasGoogleSheetsToken: boolean;
+  connectGoogleSheetsAccess: (forceConsent?: boolean) => Promise<string>;
+  recheckEmailVerification: () => Promise<boolean>;
   reauthenticateAccountManually: (currentPassword?: string) => Promise<string>;
   refreshSecuritySessionToken: () => Promise<string>;
   sendVerificationEmailManually: () => Promise<string>;
@@ -198,6 +208,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   const [securityPolicy, setSecurityPolicy] = useState<SecurityPolicySettings>(
     DEFAULT_SECURITY_POLICY
   );
+  const [hasGoogleSheetsToken, setHasGoogleSheetsToken] = useState<boolean>(() =>
+    Boolean(getCachedGoogleAccessToken())
+  );
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [denyReason, setDenyReason] = useState<AuthDenyReason>(null);
@@ -223,6 +236,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   useEffect(() => {
     void validateFirestoreConnection().catch(() => {});
+    // التقاط رمز مصادقة Google في حال العودة من مسار Redirect على أجهزة أندرويد أو المتصفحات المقيدة للنوافذ المنبثقة
+    void getRedirectResult(auth)
+      .then((res) => {
+        if (res) {
+          const cred = GoogleAuthProvider.credentialFromResult(res);
+          if (cred?.accessToken) {
+            setCachedGoogleAccessToken(cred.accessToken);
+            setHasGoogleSheetsToken(true);
+          }
+          setLastIdentityVerifiedAt(Date.now());
+        }
+      })
+      .catch((err) => {
+        if (!isBenignAbortError(err)) {
+          console.warn('Redirect sign-in check warning:', err);
+        }
+      });
   }, []);
 
   // إدارة تسجيل الدخول المغلق ومزامنة الملف الشخصي اللحظية
@@ -249,6 +279,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       syncFirebaseUserMetadata(fbUser);
 
       if (!fbUser) {
+        clearCachedGoogleAccessToken();
+        setHasGoogleSheetsToken(false);
         latestRawProfileRef.current = null;
         setUserProfile(null);
         setLastIdentityVerifiedAt(null);
@@ -256,6 +288,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         loggedSessionUidRef.current = null;
         return;
       }
+      setHasGoogleSheetsToken(Boolean(getCachedGoogleAccessToken()));
 
       const rawEmail = (fbUser.email || '').trim();
       const lowerEmail = rawEmail.toLowerCase();
@@ -671,13 +704,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     setAuthError('');
     setDenyReason(null);
     try {
-      await signInWithPopup(auth, googleProvider);
+      const result = await signInWithPopup(auth, googleProvider);
+      const cred = GoogleAuthProvider.credentialFromResult(result);
+      if (cred?.accessToken) {
+        setCachedGoogleAccessToken(cred.accessToken);
+        setHasGoogleSheetsToken(true);
+      }
       lastActivityRef.current = Date.now();
       setLastIdentityVerifiedAt(Date.now());
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || '';
       if (isBenignAbortError(err) || code === 'auth/cancelled-popup-request') {
         return;
+      }
+      if (
+        code === 'auth/popup-blocked' ||
+        code === 'auth/operation-not-supported-in-this-environment'
+      ) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch {
+          setAuthError(
+            'قام المتصفح بحظر نافذة تسجيل الدخول المنبثقة. يرجى السماح بالنوافذ المنبثقة لهذا الموقع والمحاولة مجدداً.'
+          );
+          return;
+        }
       }
       if (code === 'auth/popup-closed-by-user') {
         setAuthError('تم إغلاق نافذة تسجيل الدخول قبل إتمام المصادقة.');
@@ -692,6 +744,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       setIsBusy(false);
     }
   }, []);
+
+  const connectGoogleSheetsAccess = useCallback(
+    async (forceConsent = false): Promise<string> => {
+      const token = await requestGoogleSheetsAccessToken({ forceConsent });
+      setHasGoogleSheetsToken(Boolean(token));
+      lastActivityRef.current = Date.now();
+      return token;
+    },
+    []
+  );
+
+  const recheckEmailVerification = useCallback(async (): Promise<boolean> => {
+    const fbUser = auth.currentUser;
+    if (!fbUser) return false;
+    await fbUser.reload();
+    await fbUser.getIdToken(true);
+    syncFirebaseUserMetadata(auth.currentUser);
+    if (auth.currentUser?.emailVerified) {
+      setDenyReason(null);
+      await signOut(auth);
+      return true;
+    }
+    return false;
+  }, [syncFirebaseUserMetadata]);
 
   const loginWithEmailPassword = useCallback(
     async (email: string, password: string) => {
@@ -840,7 +916,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           );
           await reauthenticateWithCredential(fbUser, cred);
         } else if (providers.includes('google.com')) {
-          await reauthenticateWithPopup(fbUser, googleProvider);
+          const res = await reauthenticateWithPopup(fbUser, googleProvider);
+          const cred = GoogleAuthProvider.credentialFromResult(res);
+          if (cred?.accessToken) {
+            setCachedGoogleAccessToken(cred.accessToken);
+            setHasGoogleSheetsToken(true);
+          }
         } else if (hasPassword) {
           throw new Error(
             'يرجى إدخال كلمة المرور الحالية لإتمام إعادة التحقق من الهوية.'
@@ -1096,6 +1177,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         targetId: userProfile.uid,
       });
     }
+    clearCachedGoogleAccessToken();
+    setHasGoogleSheetsToken(false);
     loggedSessionUidRef.current = null;
     setDenyReason(null);
     await signOut(auth);
@@ -1110,6 +1193,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         linkedProviderIds,
         isEmailVerified,
         lastIdentityVerifiedAt,
+        hasGoogleSheetsToken,
         isAuthReady,
         isBusy,
         denyReason,
@@ -1122,6 +1206,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         updatePersonalProfileInfo,
         changeOrSetManualPassword,
         updateAccountSecuritySettings,
+        connectGoogleSheetsAccess,
+        recheckEmailVerification,
         reauthenticateAccountManually,
         refreshSecuritySessionToken,
         sendVerificationEmailManually,

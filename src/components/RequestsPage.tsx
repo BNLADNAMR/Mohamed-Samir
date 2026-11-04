@@ -28,6 +28,7 @@ import {
   submitWorkflowRequest,
 } from '../services/firestoreService';
 import { calculateShiftMinutes } from '../utils/shiftCalculations';
+import { useOverlayBackHandler } from '../utils/androidBackBridge';
 
 export const REQUEST_TYPE_LABELS: Record<WorkflowRequestType, string> = {
   leave: 'طلب إجازة',
@@ -86,6 +87,9 @@ export const RequestsPage: React.FC<RequestsPageProps> = ({
     mode: 'recommend' | 'approve' | 'reject';
   } | null>(null);
   const [reviewNote, setReviewNote] = useState('');
+
+  useOverlayBackHandler(isSubmitOpen, () => setIsSubmitOpen(false));
+  useOverlayBackHandler(Boolean(reviewModal), () => setReviewModal(null));
 
   // المندوبون المتاح اختيارهم عند تقديم طلب جديد حسب دور المستخدم
   const selectableEmployees = useMemo(() => {

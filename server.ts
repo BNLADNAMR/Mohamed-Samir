@@ -44,9 +44,68 @@ async function startServer() {
     res.json({
       status: 'ok',
       securityLayer: 'rbac-firestore-enforced',
+      googleSheetsRelayReady: true,
       externalTokenConfigured: Boolean(process.env.EXTERNAL_SHIFTS_API_TOKEN),
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // نقاط مساندة آمنة لقراءة Google Sheets API v4 بتمرير رمز Bearer الممنوح من المستخدم بعد التحقق الصارم من المعرّف
+  app.get('/api/google-sheets/metadata', async (req: Request, res: Response) => {
+    const authHeader = String(req.headers.authorization || '').trim();
+    const spreadsheetId = String(req.query.spreadsheetId || '').trim();
+    if (!authHeader.startsWith('Bearer ') || authHeader.length < 20) {
+      res.status(401).json({ error: 'يلزم تمرير رمز مصادقة Google صالح.' });
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]{15,120}$/.test(spreadsheetId)) {
+      res.status(400).json({ error: 'معرّف جدول Google Sheets غير صالح.' });
+      return;
+    }
+    try {
+      const fields =
+        'spreadsheetId,properties.title,sheets(properties(sheetId,title,index,gridProperties(rowCount,columnCount)))';
+      const upstream = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+          spreadsheetId
+        )}?fields=${encodeURIComponent(fields)}`,
+        {
+          headers: { Authorization: authHeader, Accept: 'application/json' },
+        }
+      );
+      const body = await upstream.json().catch(() => ({}));
+      res.status(upstream.status).json(body);
+    } catch {
+      res.status(502).json({ error: 'تعذر الاتصال بخدمة Google Sheets API.' });
+    }
+  });
+
+  app.get('/api/google-sheets/values', async (req: Request, res: Response) => {
+    const authHeader = String(req.headers.authorization || '').trim();
+    const spreadsheetId = String(req.query.spreadsheetId || '').trim();
+    const range = String(req.query.range || '').trim();
+    if (!authHeader.startsWith('Bearer ') || authHeader.length < 20) {
+      res.status(401).json({ error: 'يلزم تمرير رمز مصادقة Google صالح.' });
+      return;
+    }
+    if (!/^[a-zA-Z0-9_-]{15,120}$/.test(spreadsheetId) || !range || range.length > 200) {
+      res.status(400).json({ error: 'معاملات قراءة Google Sheets غير صالحة.' });
+      return;
+    }
+    try {
+      const upstream = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+          spreadsheetId
+        )}/values/${encodeURIComponent(range)}?valueRenderOption=FORMATTED_VALUE`,
+        {
+          headers: { Authorization: authHeader, Accept: 'application/json' },
+        }
+      );
+      const body = await upstream.json().catch(() => ({}));
+      res.status(upstream.status).json(body);
+    } catch {
+      res.status(502).json({ error: 'تعذر قراءة الصفوف من Google Sheets API.' });
+    }
   });
 
   // نقطة مزامنة خلفية آمنة تحمي مفاتيح API السرية في الخادم ولا تكشفها للمتصفح أبداً
@@ -203,11 +262,35 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
+    const vitePromise = createViteServer({
+      server: {
+        middlewareMode: true,
+        watch:
+          process.env.DISABLE_HMR === 'true'
+            ? null
+            : {
+                ignored: ['**/android/**', '**/docs/**', '**/dist/**'],
+              },
+      },
+      optimizeDeps: {
+        entries: ['index.html'],
+      },
       appType: 'spa',
     });
-    app.use(vite.middlewares);
+
+    // منع أي خطأ غير معالج أثناء التهيئة الأولية لخادم Vite
+    vitePromise.catch((err) => {
+      console.error('Failed to initialize Vite dev middleware:', err);
+    });
+
+    app.use(async (req, res, next) => {
+      try {
+        const vite = await vitePromise;
+        vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
+      }
+    });
   } else {
     const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath));

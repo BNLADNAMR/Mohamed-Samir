@@ -11,6 +11,7 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useAndroidHardwareBackButton } from '../utils/androidBackBridge';
 
 interface AuthScreenProps {
   isDarkMode: boolean;
@@ -31,6 +32,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     loginWithGoogle,
     loginWithEmailPassword,
     requestPasswordReset,
+    sendVerificationEmailManually,
+    recheckEmailVerification,
     logout,
   } = useAuth();
 
@@ -69,29 +72,50 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     Boolean(authError) ||
     Boolean(resetStatus);
 
-  const handleAuthBack = async () => {
+  const [exitHintVisible, setExitHintVisible] = useState(false);
+
+  const handleAuthBackStep = (): boolean => {
     if (showEmailForm) {
       setShowEmailForm(false);
       setResetStatus(null);
       clearAuthError();
-      return;
+      return true;
     }
     if (resetStatus || authError) {
       setResetStatus(null);
       clearAuthError();
-      return;
+      return true;
     }
     if (firebaseUser) {
-      await logout();
-      return;
+      void logout();
+      return true;
     }
     if (typeof window !== 'undefined' && window.location.hash) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      return true;
     }
+    return false;
   };
+
+  const handleAuthBack = async () => {
+    handleAuthBackStep();
+  };
+
+  useAndroidHardwareBackButton({
+    onStepBackOrCloseOverlay: handleAuthBackStep,
+    onShowExitConfirmHint: () => {
+      setExitHintVisible(true);
+      window.setTimeout(() => setExitHintVisible(false), 2200);
+    },
+  });
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-150">
+      {exitHintVisible && (
+        <div className="fixed bottom-4 left-4 z-50 px-4 py-2.5 rounded-lg shadow-lg border bg-slate-900 text-white border-slate-700 text-xs font-bold">
+          اضغط زر الرجوع مرة أخرى للخروج من التطبيق.
+        </div>
+      )}
       {/* شريط علوي متسق مع هوية التطبيق وزر الرجوع للخلف */}
       <header className="sticky top-0 z-30 bg-slate-900 dark:bg-slate-950 text-white border-b border-slate-800 px-6 py-3.5">
         <div className="max-w-[1400px] mx-auto flex flex-wrap items-center justify-between gap-3">
@@ -231,19 +255,65 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             )}
 
             {denyReason === 'unverified' && (
-              <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900 text-amber-950 dark:text-amber-200 space-y-2">
+              <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900 text-amber-950 dark:text-amber-200 space-y-2.5">
                 <div className="font-bold text-sm">يرجى تأكيد البريد الإلكتروني أولاً</div>
                 <p className="leading-relaxed">
-                  يشترط النظام التحقق من ملكية البريد الإلكتروني قبل تفعيل صلاحيات الحساب.
+                  يشترط النظام التحقق من ملكية البريد الإلكتروني قبل تفعيل صلاحيات الحساب. بعد النقر على رابط التفعيل في بريدك، اضغط على زر التحديث أدناه أو أعد تسجيل الدخول.
                 </p>
                 {firebaseUser && (
-                  <button
-                    type="button"
-                    onClick={logout}
-                    className="w-full py-2 px-3 bg-slate-800 text-white rounded-lg font-bold"
-                  >
-                    تسجيل الخروج
-                  </button>
+                  <div className="space-y-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setResetStatus(null);
+                        try {
+                          const msg = await sendVerificationEmailManually();
+                          setResetStatus({ type: 'success', message: msg });
+                        } catch (err) {
+                          setResetStatus({
+                            type: 'error',
+                            message:
+                              err instanceof Error
+                                ? err.message
+                                : 'تعذر إرسال رسالة التوثيق.',
+                          });
+                        }
+                      }}
+                      className="w-full py-2 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold transition-colors cursor-pointer"
+                    >
+                      إرسال رابط تأكيد البريد الإلكتروني
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setResetStatus(null);
+                        const verified = await recheckEmailVerification();
+                        if (verified) {
+                          setResetStatus({
+                            type: 'success',
+                            message:
+                              'تم التحقق من توثيق بريدك بنجاح! يرجى تسجيل الدخول الآن لتفعيل حسابك.',
+                          });
+                        } else {
+                          setResetStatus({
+                            type: 'error',
+                            message:
+                              'لم يظهر تأكيد البريد بعد. يرجى فتح الرسالة في بريدك والضغط على رابط التفعيل أولاً.',
+                          });
+                        }
+                      }}
+                      className="w-full py-2 px-3 bg-amber-700 hover:bg-amber-600 text-white rounded-lg font-bold transition-colors cursor-pointer"
+                    >
+                      تحديث الحالة بعد الضغط على رابط التفعيل
+                    </button>
+                    <button
+                      type="button"
+                      onClick={logout}
+                      className="w-full py-2 px-3 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-bold transition-colors cursor-pointer"
+                    >
+                      تسجيل الخروج
+                    </button>
+                  </div>
                 )}
               </div>
             )}
@@ -301,10 +371,40 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   type="button"
                   disabled={isBusy}
                   onClick={loginWithGoogle}
-                  className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl font-bold text-sm flex items-center justify-center gap-2.5 shadow-sm transition-colors cursor-pointer"
+                  className="gsi-material-button w-full min-h-[46px] py-2.5 px-4 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-750 border border-slate-300 dark:border-slate-700 disabled:opacity-50 text-slate-900 dark:text-white rounded-xl font-bold text-sm flex items-center justify-center gap-3 shadow-xs transition-all cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-600"
                 >
-                  <ShieldCheck className="w-4 h-4" />
-                  {isBusy ? 'جارٍ التحقق من الهوية...' : 'تسجيل الدخول بحساب Google المعتمد'}
+                  <span className="w-5 h-5 shrink-0 flex items-center justify-center">
+                    <svg
+                      version="1.1"
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 48 48"
+                      className="w-5 h-5 block"
+                      aria-hidden="true"
+                    >
+                      <path
+                        fill="#EA4335"
+                        d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                      />
+                      <path
+                        fill="#4285F4"
+                        d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                      />
+                      <path
+                        fill="#FBBC05"
+                        d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                      />
+                      <path
+                        fill="#34A853"
+                        d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                      />
+                      <path fill="none" d="M0 0h48v48H0z" />
+                    </svg>
+                  </span>
+                  <span className="gsi-material-button-contents">
+                    {isBusy
+                      ? 'جارٍ التحقق من الهوية عبر Google...'
+                      : 'تسجيل الدخول باستخدام Google'}
+                  </span>
                 </button>
 
                 <div className="relative py-1">

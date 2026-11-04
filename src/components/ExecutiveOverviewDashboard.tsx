@@ -53,6 +53,7 @@ import {
 import { ShiftCasePageType } from './ShiftCaseDetailPage';
 import { SecurityHubTab } from './SuperAdminSecurityHub';
 import { NavigationSnapshot } from '../utils/navigationHistory';
+import { useOverlayBackHandler } from '../utils/androidBackBridge';
 import {
   MONTH_NAMES,
   computeEmployeeSummary,
@@ -297,6 +298,11 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
   const [selectedMapRepId, setSelectedMapRepId] = useState<string | null>(null);
   const [isSimPanelOpen, setIsSimPanelOpen] = useState<boolean>(false);
   const [overviewFitTrigger, setOverviewFitTrigger] = useState<number>(1);
+
+  useOverlayBackHandler(isSimPanelOpen, () => setIsSimPanelOpen(false));
+  useOverlayBackHandler(Boolean(selectedMapRepId), () => setSelectedMapRepId(null));
+  useOverlayBackHandler(Boolean(drillDown), () => setDrillDown(null));
+  useOverlayBackHandler(isDayPickerOpen, () => setIsDayPickerOpen(false));
 
   // إغلاق نافذة التفاصيل المبسطة أو قائمة الأيام بزر Escape أو النقر خارجها
   useEffect(() => {

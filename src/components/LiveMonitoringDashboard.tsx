@@ -45,6 +45,7 @@ import {
   Team,
   UserProfile,
 } from '../types';
+import { useOverlayBackHandler } from '../utils/androidBackBridge';
 import { canAccessRoute } from '../utils/rbac';
 import { buildRoleWorkspaceConfig } from '../utils/roleWorkspaces';
 import {
@@ -227,6 +228,9 @@ export const LiveMonitoringDashboard: React.FC<LiveMonitoringDashboardProps> = (
   const [sidebarLimit, setSidebarLimit] = useState(60);
   const [fitBoundsTrigger, setFitBoundsTrigger] = useState(1);
   const [isSimBarOpen, setIsSimBarOpen] = useState<boolean>(false);
+
+  useOverlayBackHandler(isSimBarOpen, () => setIsSimBarOpen(false));
+  useOverlayBackHandler(Boolean(selectedRepId), () => setSelectedRepId(null));
   const [dismissedBannerEpisodes, setDismissedBannerEpisodes] = useState<
     Record<string, boolean>
   >({});

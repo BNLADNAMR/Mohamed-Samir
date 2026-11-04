@@ -6,3 +6,15 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Android / Gradle transient build artifacts
+android/.gradle/
+android/.idea/
+android/build/
+android/app/build/
+android/app/release/
+android/capacitor-cordova-android-plugins/build/
+android/local.properties
+*.apk
+*.aab
+

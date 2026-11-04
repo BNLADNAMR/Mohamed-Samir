@@ -23,6 +23,7 @@ import {
   saveTeamRecord,
   transferEmployeeToTeam,
 } from '../services/firestoreService';
+import { useOverlayBackHandler } from '../utils/androidBackBridge';
 
 interface TeamsManagementPageProps {
   currentUser: UserProfile;
@@ -58,6 +59,9 @@ export const TeamsManagementPage: React.FC<TeamsManagementPageProps> = ({
 
   const [transferTargetEmp, setTransferTargetEmp] = useState<Employee | null>(null);
   const [destinationTeamId, setDestinationTeamId] = useState('');
+
+  useOverlayBackHandler(isModalOpen, () => setIsModalOpen(false));
+  useOverlayBackHandler(Boolean(transferTargetEmp), () => setTransferTargetEmp(null));
 
   const supervisorsList = useMemo(
     () => users.filter((u) => u.role === 'supervisor' && u.status === 'active'),

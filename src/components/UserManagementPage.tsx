@@ -47,6 +47,7 @@ import {
   updatePreprovisionedInvitationByAdmin,
   updateUserAccountByAdmin,
 } from '../services/firestoreService';
+import { useOverlayBackHandler } from '../utils/androidBackBridge';
 
 interface UserManagementPageProps {
   currentUser: UserProfile;
@@ -92,6 +93,9 @@ export const UserManagementPage: React.FC<UserManagementPageProps> = ({
     | { kind: 'invitation'; data: PreprovisionedInvitation }
     | null
   >(null);
+
+  useOverlayBackHandler(isCreateOpen, () => setIsCreateOpen(false));
+  useOverlayBackHandler(Boolean(editingTarget), () => setEditingTarget(null));
 
   // نموذج التخصيص المسبق بالبريد أو التعديل المتقدم
   const [formName, setFormName] = useState('');
