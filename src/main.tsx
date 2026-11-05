@@ -1,20 +1,13 @@
-import { installGlobalAbortErrorGuard } from './utils/abortErrorGuard';
-import { createRoot } from 'react-dom/client';
-import App from './App.tsx';
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { App } from './App';
+import { AuthProvider } from './context/AuthContext';
 import './index.css';
 
-installGlobalAbortErrorGuard();
-
-(window as unknown as { gm_authFailure?: () => void }).gm_authFailure = () => {
-  window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
-};
-const origConsoleError = console.error;
-console.error = (...args: unknown[]) => {
-  origConsoleError.apply(console, args);
-  const msg = args.map((a) => String(a)).join(' ');
-  if (msg.includes('OverQuotaMapError') || msg.includes('QuotaExceededError')) {
-    window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
-  }
-};
-
-createRoot(document.getElementById('root')!).render(<App />);
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <AuthProvider>
+      <App />
+    </AuthProvider>
+  </React.StrictMode>
+);

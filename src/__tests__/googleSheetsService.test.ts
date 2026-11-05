@@ -153,4 +153,34 @@ describe('Google Sheets Service & Shift Data Parser', () => {
     expect(parsed.attendanceRecords['R201_2026-11-04'].endTime).toBe('16:30');
     expect(parsed.attendanceRecords['R201_2026-11-04'].totalWorkedMinutes).toBe(480);
   });
+
+  it('persists and normalizes manual vs automatic Google Sheets sync preferences without storing tokens', async () => {
+    const {
+      loadGoogleSheetsSyncPreferences,
+      saveGoogleSheetsSyncPreferences,
+    } = await import('../services/googleSheetsService');
+
+    const initial = loadGoogleSheetsSyncPreferences();
+    expect(initial.syncMode).toBe('manual');
+
+    const updated = saveGoogleSheetsSyncPreferences({
+      syncMode: 'auto',
+      intervalMinutes: 10,
+      spreadsheetInput:
+        'https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit',
+      sheetTitle: 'شفتات نوفمبر',
+    });
+
+    expect(updated.syncMode).toBe('auto');
+    expect(updated.intervalMinutes).toBe(10);
+    expect(updated.sheetTitle).toBe('شفتات نوفمبر');
+
+    const reloaded = loadGoogleSheetsSyncPreferences();
+    expect(reloaded.syncMode).toBe('auto');
+    expect(reloaded.intervalMinutes).toBe(10);
+    expect('accessToken' in (reloaded as unknown as Record<string, unknown>)).toBe(
+      false
+    );
+  });
 });
+

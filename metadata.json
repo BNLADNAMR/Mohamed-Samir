@@ -1,8 +1,8 @@
 {
   "name": "نظام متابعة الشفتات وأداء المندوبين",
-  "description": "نظام احترافي لإدارة الحضور اليومي ومتابعة جدولة الشفتات ومؤشرات الأداء الشهرية للمندوبين",
-  "requestFramePermissions": [],
-  "majorCapabilities": [
+  "description": "منظومة سحابية متكاملة لإدارة ومتابعة الشفتات وحضور المندوبين وتقييم الأداء بنظام الصلاحيات المتقدم (RBAC) وقاعدة بيانات Firestore ومزامنة Google Sheets",
+  "permissions": [],
+  "capabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }

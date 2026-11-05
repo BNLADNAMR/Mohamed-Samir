@@ -1,6 +1,6 @@
 {
-  "appId": "com.workspace.shifttracker",
-  "appName": "Shift Workspace",
+  "applicationId": "com.workspace.shifttracker",
+  "appName": "نظام متابعة الشفتات",
   "versionName": "1.0.0",
   "versionCode": 1
 }

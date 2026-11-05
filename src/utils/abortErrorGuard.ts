@@ -81,6 +81,86 @@ export function isBenignAbortError(error: unknown): boolean {
     return true;
   }
 
+  // 4. أخطاء محاولة إضافات المتصفح الخارجية الكتابة فوق خاصية window.fetch المعرفة بـ getter فقط
+  if (
+    lowerMessage.includes(
+      'cannot set property fetch of #<window> which has only a getter'
+    ) ||
+    lowerMessage.includes("cannot assign to read only property 'fetch'")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * التحقق مما إذا كان الخطأ صادراً بالكامل من إضافة متصفح خارجية (chrome-extension:// أو moz-extension://)
+ * ولا ينتمي لكود التطبيق
+ */
+export function isExternalBrowserExtensionError(
+  error: unknown,
+  filename?: string
+): boolean {
+  const cleanFile = (filename || '').trim().toLowerCase();
+  if (
+    cleanFile.startsWith('chrome-extension://') ||
+    cleanFile.startsWith('moz-extension://') ||
+    cleanFile.startsWith('safari-extension://') ||
+    cleanFile.startsWith('safari-web-extension://')
+  ) {
+    return true;
+  }
+
+  if (typeof error === 'object' && error !== null) {
+    const stack = String((error as { stack?: unknown }).stack || '').toLowerCase();
+    if (
+      stack.includes('chrome-extension://') ||
+      stack.includes('moz-extension://') ||
+      stack.includes('safari-extension://')
+    ) {
+      const appOrigin =
+        typeof window !== 'undefined' && window.location?.origin
+          ? window.location.origin.toLowerCase()
+          : '';
+      if (!appOrigin || !stack.includes(appOrigin)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * تحصين خاصية fetch على كائن النافذة إذا كانت معرفة بـ getter فقط دون setter،
+ * حتى لا تتسبب إضافات المتصفح الخارجية (مثل Similarweb / Ant) في رمي TypeError عند تحميل الصفحة.
+ */
+export function ensureWindowFetchSetterSafe(targetObj: object = typeof window !== 'undefined' ? window : {}): boolean {
+  try {
+    const desc = Object.getOwnPropertyDescriptor(targetObj, 'fetch');
+    if (
+      desc &&
+      typeof desc.get === 'function' &&
+      typeof desc.set !== 'function' &&
+      desc.configurable !== false
+    ) {
+      const origGetter = desc.get;
+      Object.defineProperty(targetObj, 'fetch', {
+        configurable: true,
+        enumerable: desc.enumerable !== false,
+        get() {
+          return origGetter.call(targetObj);
+        },
+        set() {
+          // تجاهل محاولة الإضافة الخارجية الكتابة فوق fetch مع الإبقاء على الدالة الأصلية سليمة
+        },
+      });
+      return true;
+    }
+  } catch {
+    // في حال كانت الخاصية غير قابلة لإعادة التعريف نتجاهل بهدوء ويتولى معالج الخطأ العام الحماية
+  }
   return false;
 }
 
@@ -91,8 +171,8 @@ declare global {
 }
 
 /**
- * تثبيت حارس عام مبكر لمنع ظهور أخطاء الإلغاء العابرة (AbortError) كأخطاء غير معالجة
- * أثناء إعادة تحميل إطار المعاينة أو إغلاق قنوات البث اللحظي.
+ * تثبيت حارس عام مبكر لمنع ظهور أخطاء الإلغاء العابرة (AbortError) أو أخطاء إضافات المتصفح الخارجية
+ * كأخطاء غير معالجة أثناء إعادة تحميل إطار المعاينة أو إغلاق قنوات البث اللحظي.
  */
 export function installGlobalAbortErrorGuard(): void {
   if (typeof window === 'undefined' || window.__shiftTrackerAbortGuardInstalled) {
@@ -100,10 +180,15 @@ export function installGlobalAbortErrorGuard(): void {
   }
   window.__shiftTrackerAbortGuardInstalled = true;
 
+  ensureWindowFetchSetterSafe(window);
+
   window.addEventListener(
     'unhandledrejection',
     (event: PromiseRejectionEvent) => {
-      if (isBenignAbortError(event.reason)) {
+      if (
+        isBenignAbortError(event.reason) ||
+        isExternalBrowserExtensionError(event.reason)
+      ) {
         event.preventDefault();
         event.stopImmediatePropagation();
       }
@@ -114,7 +199,11 @@ export function installGlobalAbortErrorGuard(): void {
   window.addEventListener(
     'error',
     (event: ErrorEvent) => {
-      if (isBenignAbortError(event.error ?? event.message)) {
+      const candidate = event.error ?? event.message;
+      if (
+        isBenignAbortError(candidate) ||
+        isExternalBrowserExtensionError(candidate, event.filename)
+      ) {
         event.preventDefault();
         event.stopImmediatePropagation();
       }
@@ -122,3 +211,4 @@ export function installGlobalAbortErrorGuard(): void {
     { capture: true }
   );
 }
+

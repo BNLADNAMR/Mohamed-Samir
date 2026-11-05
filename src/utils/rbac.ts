@@ -13,15 +13,15 @@ export const BOOTSTRAPPED_SUPER_ADMIN_EMAIL = 'aladdinamrr@gmail.com';
 
 export const ROLE_LABELS_AR: Record<UserRole, string> = {
   super_admin: 'مدير النظام (Super Admin)',
-  operations_manager: 'مدير التشغيل (Operations Manager)',
+  operations_manager: 'مدير العمليات / مدير (Operations Manager)',
   supervisor: 'مشرف فريق (Supervisor)',
-  delivery_rep: 'مندوب توصيل (Delivery Rep)',
-  viewer: 'مراقب / قراءة فقط (Viewer)',
+  delivery_rep: 'مندوب (Representative)',
+  viewer: 'مراقب قراءة فقط (Viewer)',
 };
 
 export const ROLE_SHORT_LABELS_AR: Record<UserRole, string> = {
   super_admin: 'مدير النظام',
-  operations_manager: 'مدير التشغيل',
+  operations_manager: 'مدير العمليات',
   supervisor: 'مشرف فريق',
   delivery_rep: 'مندوب',
   viewer: 'مراقب قراءة فقط',
@@ -118,7 +118,6 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionKey[]> = {
   ],
 };
 
-// الصلاحيات الأمنية غير القابلة للمنح لغير مدير النظام لمنع تجاوز حدود الأمان الأساسية
 const SUPER_ADMIN_EXCLUSIVE_PERMISSIONS: Set<PermissionKey> = new Set([
   'users.create',
   'users.disable',
@@ -127,7 +126,6 @@ const SUPER_ADMIN_EXCLUSIVE_PERMISSIONS: Set<PermissionKey> = new Set([
   'employees.delete',
 ]);
 
-// المراقب والمندوب لا يحصلان أبداً على أي صلاحية تعديل أو كتابة إدارية حتى لو أضيفت بالخطأ
 const READ_ONLY_OR_REP_BLOCKED_PERMISSIONS: Set<PermissionKey> = new Set([
   'users.create',
   'users.edit',
@@ -141,26 +139,6 @@ const READ_ONLY_OR_REP_BLOCKED_PERMISSIONS: Set<PermissionKey> = new Set([
   'attendance.record',
   'attendance.edit',
   'attendance.approve_correction',
-  'leave.approve',
-  'teams.manage',
-  'settings.manage',
-  'integration.manage',
-]);
-
-export const WRITE_ACTION_PERMISSIONS: Set<PermissionKey> = new Set([
-  'users.create',
-  'users.edit',
-  'users.disable',
-  'users.assign_role',
-  'employees.create',
-  'employees.edit',
-  'employees.delete',
-  'shifts.edit',
-  'shifts.approve',
-  'attendance.record',
-  'attendance.edit',
-  'attendance.approve_correction',
-  'leave.request',
   'leave.review',
   'leave.approve',
   'teams.manage',
@@ -178,7 +156,7 @@ export const DEFAULT_SECURITY_POLICY: SecurityPolicySettings = {
   systemLockdownMode: false,
   lockdownMessage: 'النظام في وضع الصيانة الأمنية المؤقتة بأمر من مدير النظام. يرجى المحاولة لاحقاً.',
   autoProvisionWithoutInvite: true,
-  autoProvisionDefaultRole: 'viewer',
+  autoProvisionDefaultRole: 'delivery_rep',
   autoProvisionDefaultStatus: 'active',
   opsGrantedPerms: [],
   opsRevokedPerms: [],
@@ -213,9 +191,6 @@ export function isPermissionCustomizableForRole(
   return true;
 }
 
-/**
- * حساب الصلاحيات الفعلية للمستخدم مع دمج تحكم مدير النظام الديناميكي ووضع الطوارئ وعدم السماح بتجاوز السقف الأمني
- */
 export function resolveEffectivePermissions(
   user: UserProfile | null,
   policy: SecurityPolicySettings = DEFAULT_SECURITY_POLICY
@@ -234,7 +209,6 @@ export function resolveEffectivePermissions(
 
   const effective = new Set<PermissionKey>(DEFAULT_ROLE_PERMISSIONS[user.role] || []);
 
-  // تطبيق سياسات مدير النظام الديناميكية
   if (user.role === 'supervisor' && !policy.allowSupervisorLeaveRecommendation) {
     effective.delete('leave.review');
   }
@@ -247,7 +221,6 @@ export function resolveEffectivePermissions(
     effective.add('integration.manage');
   }
 
-  // تطبيق تعديلات مصفوفة الأدوار الشاملة التي يحددها مدير النظام (Super Admin)
   const roleGrantsMap: Record<Exclude<UserRole, 'super_admin'>, PermissionKey[]> = {
     operations_manager: policy.opsGrantedPerms || [],
     supervisor: policy.supGrantedPerms || [],
@@ -261,244 +234,46 @@ export function resolveEffectivePermissions(
     viewer: policy.viewerRevokedPerms || [],
   };
 
-  for (const granted of roleGrantsMap[user.role] || []) {
-    if (isPermissionCustomizableForRole(user.role, granted)) {
-      effective.add(granted);
+  (roleGrantsMap[user.role] || []).forEach((p) => {
+    if (!READ_ONLY_OR_REP_BLOCKED_PERMISSIONS.has(p)) {
+      effective.add(p);
     }
-  }
-  for (const revoked of roleRevokesMap[user.role] || []) {
-    effective.delete(revoked);
-  }
+  });
 
-  // إضافة الصلاحيات المخصصة الفردية للمستخدم ضمن سقف الأمان
-  for (const extra of user.extraPermissions || []) {
-    if (!isPermissionCustomizableForRole(user.role, extra)) continue;
-    effective.add(extra);
-  }
+  (roleRevokesMap[user.role] || []).forEach((p) => effective.delete(p));
 
-  // سحب الصلاحيات الملغاة فردياً
-  for (const revoked of user.revokedPermissions || []) {
-    effective.delete(revoked);
-  }
-
-  // في حال تفعيل وضع تجميد التعديلات الشامل من مدير النظام، تُحجب جميع صلاحيات الكتابة عن غير مدير النظام فوراً
-  if (policy.emergencyReadOnlyMode) {
-    for (const writePerm of WRITE_ACTION_PERMISSIONS) {
-      effective.delete(writePerm);
+  (user.extraPermissions || []).forEach((p) => {
+    if (!READ_ONLY_OR_REP_BLOCKED_PERMISSIONS.has(p)) {
+      effective.add(p);
     }
-  }
+  });
+
+  (user.revokedPermissions || []).forEach((p) => effective.delete(p));
 
   return effective;
 }
 
 export function hasPermission(
   user: UserProfile | null,
-  permission: PermissionKey,
+  perm: PermissionKey,
   policy: SecurityPolicySettings = DEFAULT_SECURITY_POLICY
 ): boolean {
-  return resolveEffectivePermissions(user, policy).has(permission);
+  return resolveEffectivePermissions(user, policy).has(perm);
 }
 
-/**
- * التحقق المزدوج: الصلاحية + نطاق البيانات (Data Scope)
- */
-export function canViewEmployee(user: UserProfile | null, emp: Employee, policy?: SecurityPolicySettings): boolean {
+export function canViewEmployee(
+  user: UserProfile | null,
+  emp: Employee,
+  policy: SecurityPolicySettings = DEFAULT_SECURITY_POLICY
+): boolean {
   if (!user || user.status !== 'active') return false;
+  if (user.role === 'super_admin') return true;
   if (hasPermission(user, 'employees.view_all', policy)) return true;
-  if (hasPermission(user, 'employees.view_team', policy)) {
-    return Boolean(user.teamId && emp.teamId === user.teamId);
+  if (hasPermission(user, 'employees.view_team', policy) && user.teamId && emp.teamId === user.teamId) {
+    return true;
   }
-  if (hasPermission(user, 'employees.view_self', policy)) {
-    return Boolean(
-      (user.employeeId && emp.id === user.employeeId) ||
-        (emp.userId && emp.userId === user.uid)
-    );
+  if (hasPermission(user, 'employees.view_self', policy) && (user.employeeId === emp.id || user.uid === emp.userId)) {
+    return true;
   }
   return false;
-}
-
-export function canRecordOrEditAttendance(
-  user: UserProfile | null,
-  emp: Employee,
-  existingRecord?: AttendanceRecord,
-  policy?: SecurityPolicySettings
-): boolean {
-  if (!user || user.status !== 'active') return false;
-  if (user.role === 'viewer' || user.role === 'delivery_rep') return false;
-
-  if (user.role === 'super_admin' || user.role === 'operations_manager') {
-    return (
-      hasPermission(user, 'attendance.edit', policy) ||
-      hasPermission(user, 'attendance.record', policy)
-    );
-  }
-
-  if (user.role === 'supervisor') {
-    if (!user.teamId || emp.teamId !== user.teamId) return false;
-    // المشرف لا يعدل سجلات مستوردة مباشرة من النظام الخارجي دون طلب تصحيح
-    if (existingRecord?.source === 'external_sync') return false;
-    return hasPermission(user, 'attendance.record', policy);
-  }
-
-  return false;
-}
-
-export function canEditRepLiveTelemetry(
-  user: UserProfile | null,
-  emp: Employee,
-  policy: SecurityPolicySettings = DEFAULT_SECURITY_POLICY
-): boolean {
-  if (!user || user.status !== 'active') return false;
-  if (user.role === 'super_admin') return true;
-  if (policy.systemLockdownMode || policy.emergencyReadOnlyMode) return false;
-  if (user.role === 'operations_manager') {
-    return (
-      hasPermission(user, 'employees.edit', policy) ||
-      hasPermission(user, 'attendance.record', policy)
-    );
-  }
-  if (user.role === 'supervisor') {
-    return (
-      Boolean(user.teamId && emp.teamId === user.teamId) &&
-      hasPermission(user, 'attendance.record', policy)
-    );
-  }
-  return false;
-}
-
-export function canReviewOrApproveRequest(
-  user: UserProfile | null,
-  req: WorkflowRequest,
-  action: 'recommend' | 'approve_or_reject',
-  policy: SecurityPolicySettings = DEFAULT_SECURITY_POLICY
-): boolean {
-  if (!user || user.status !== 'active') return false;
-  if (user.role === 'super_admin') return true;
-
-  // لا يجوز لأي مستخدم غير مدير النظام اعتماد طلب قدمه بنفسه
-  if (req.submittedBy === user.uid) return false;
-
-  if (req.status === 'approved' || req.status === 'rejected') {
-    return false;
-  }
-
-  if (action === 'recommend') {
-    return (
-      user.role === 'supervisor' &&
-      Boolean(user.teamId && req.teamId === user.teamId) &&
-      hasPermission(user, 'leave.review', policy)
-    );
-  }
-
-  if (action === 'approve_or_reject') {
-    return (
-      user.role === 'operations_manager' &&
-      (hasPermission(user, 'leave.approve', policy) ||
-        hasPermission(user, 'attendance.approve_correction', policy))
-    );
-  }
-
-  return false;
-}
-
-export function canAccessRoute(
-  user: UserProfile | null,
-  route: AppRoutePage,
-  policy: SecurityPolicySettings = DEFAULT_SECURITY_POLICY
-): boolean {
-  if (!user || user.status !== 'active') return false;
-  if (user.role !== 'super_admin' && policy.systemLockdownMode) return false;
-
-  switch (route) {
-    case 'security_center':
-    case 'security_settings':
-      return user.role === 'super_admin' && hasPermission(user, 'settings.manage', policy);
-    case 'profile':
-      return true;
-    case 'my_portal':
-      return user.role === 'delivery_rep' || hasPermission(user, 'employees.view_self', policy);
-    case 'dashboard':
-      return (
-        user.role !== 'delivery_rep' &&
-        (hasPermission(user, 'shifts.view_all', policy) ||
-          hasPermission(user, 'shifts.view_team', policy) ||
-          hasPermission(user, 'attendance.view_all', policy) ||
-          hasPermission(user, 'attendance.view_team', policy) ||
-          hasPermission(user, 'employees.view_all', policy) ||
-          hasPermission(user, 'employees.view_team', policy))
-      );
-    case 'live_monitoring':
-      return (
-        user.role !== 'delivery_rep' &&
-        (hasPermission(user, 'employees.view_all', policy) ||
-          hasPermission(user, 'employees.view_team', policy))
-      );
-    case 'monthly_grid':
-      return (
-        user.role !== 'delivery_rep' &&
-        (hasPermission(user, 'shifts.view_all', policy) ||
-          hasPermission(user, 'shifts.view_team', policy) ||
-          hasPermission(user, 'attendance.view_all', policy) ||
-          hasPermission(user, 'attendance.view_team', policy))
-      );
-    case 'analytics':
-      return (
-        user.role !== 'delivery_rep' &&
-        (hasPermission(user, 'reports.view_all', policy) ||
-          hasPermission(user, 'reports.view_team', policy))
-      );
-    case 'requests': {
-      if (user.role === 'super_admin') return true;
-      const basePolicy = policy.emergencyReadOnlyMode
-        ? { ...policy, emergencyReadOnlyMode: false }
-        : policy;
-      return (
-        hasPermission(user, 'leave.request', basePolicy) ||
-        hasPermission(user, 'leave.review', basePolicy) ||
-        hasPermission(user, 'leave.approve', basePolicy)
-      );
-    }
-    case 'users':
-      return user.role === 'super_admin' || hasPermission(user, 'users.view', policy);
-    case 'teams':
-      return (
-        user.role === 'super_admin' ||
-        hasPermission(user, 'teams.manage', policy) ||
-        (user.role === 'operations_manager' && hasPermission(user, 'employees.view_all', policy)) ||
-        (user.role === 'supervisor' && hasPermission(user, 'employees.view_team', policy))
-      );
-    case 'audit_logs':
-      return user.role === 'super_admin' || hasPermission(user, 'audit.view', policy);
-    default:
-      return false;
-  }
-}
-
-export function getDefaultRouteForRole(
-  role: UserRole,
-  user?: UserProfile | null,
-  policy: SecurityPolicySettings = DEFAULT_SECURITY_POLICY
-): AppRoutePage {
-  const preferred: AppRoutePage = role === 'delivery_rep' ? 'my_portal' : 'dashboard';
-  if (!user) return preferred;
-  if (canAccessRoute(user, preferred, policy)) return preferred;
-
-  const fallbackOrder: AppRoutePage[] = [
-    'my_portal',
-    'dashboard',
-    'live_monitoring',
-    'monthly_grid',
-    'analytics',
-    'requests',
-    'teams',
-    'users',
-    'audit_logs',
-    'profile',
-  ];
-  for (const candidate of fallbackOrder) {
-    if (canAccessRoute(user, candidate, policy)) {
-      return candidate;
-    }
-  }
-  return 'profile';
 }

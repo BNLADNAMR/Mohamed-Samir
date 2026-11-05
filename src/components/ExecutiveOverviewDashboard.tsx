@@ -575,7 +575,7 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
         : 0;
 
     const calcPctDelta = (curr: number, prev: number) => {
-      if (prev <= 0) return curr > 0 ? 12.5 : 0;
+      if (prev <= 0) return curr > 0 ? 100 : 0;
       return Number((((curr - prev) / prev) * 100).toFixed(1));
     };
 
@@ -809,7 +809,7 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
         item.prevHours > 0
           ? Number((((item.hours - item.prevHours) / item.prevHours) * 100).toFixed(1))
           : item.hours > 0
-          ? 8.4
+          ? 100
           : 0;
 
       return {
@@ -978,7 +978,7 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
         caseTarget: 'all_shifts' as ShiftCasePageType,
       },
     ];
-  }, [employees, summaries]);
+  }, [employees, effectiveSummaries, activeMonthDay]);
 
   const openCasePage = (caseType: ShiftCasePageType) => {
     setDrillDown(null);
@@ -1008,7 +1008,7 @@ export const ExecutiveOverviewDashboard: React.FC<ExecutiveOverviewDashboardProp
         { label: 'معدل الغياب والتعثر', value: `${teamRow.absencePct}%`, tone: 'rose' },
       ],
       matchedEmployees: teamRow.members.slice(0, 8).map((emp) => {
-        const s = summaries[emp.id];
+        const s = effectiveSummaries[emp.id];
         return {
           emp,
           metricLabel: 'الساعات · الأداء',

@@ -92,4 +92,46 @@ describe('abortErrorGuard — isBenignAbortError', () => {
     expect(caughtState.hasError).toBe(true);
     expect(caughtState.errorMessage).toContain('users/u1');
   });
+
+  it('neutralizes getter-only window.fetch TypeError and filters external chrome-extension:// errors', async () => {
+    const {
+      ensureWindowFetchSetterSafe,
+      isExternalBrowserExtensionError,
+    } = await import('../utils/abortErrorGuard');
+
+    const mockWin: Record<string, unknown> = {};
+    const nativeFetch = () => Promise.resolve('ok');
+    Object.defineProperty(mockWin, 'fetch', {
+      configurable: true,
+      get: () => nativeFetch,
+    });
+
+    // بدون التحصين: الكتابة في الوضع الصارم ترمي TypeError
+    expect(() => {
+      mockWin.fetch = () => Promise.resolve('hijacked');
+    }).toThrow(TypeError);
+
+    // بعد التحصين: لا ترمي خطأ وتظل الدالة الأصلية سليمة ومحمية
+    expect(ensureWindowFetchSetterSafe(mockWin)).toBe(true);
+    expect(() => {
+      mockWin.fetch = () => Promise.resolve('hijacked');
+    }).not.toThrow();
+    expect(mockWin.fetch).toBe(nativeFetch);
+
+    // فحص اكتشاف خطأ الإضافة الخارجية المبلغ عنه حرفياً
+    const extErr = new TypeError(
+      'Cannot set property fetch of #<Window> which has only a getter'
+    );
+    extErr.stack =
+      'TypeError: Cannot set property fetch of #<Window> which has only a getter\n    at n.value (chrome-extension://hoklmmgfnpapgjgcpechhaamimifchmp/frame_ant/frame_ant.js:2:17820)';
+
+    expect(isBenignAbortError(extErr)).toBe(true);
+    expect(
+      isExternalBrowserExtensionError(
+        extErr,
+        'chrome-extension://hoklmmgfnpapgjgcpechhaamimifchmp/frame_ant/frame_ant.js'
+      )
+    ).toBe(true);
+  });
 });
+

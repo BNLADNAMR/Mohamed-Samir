@@ -223,3 +223,99 @@ export function getBackTargetHintAr(params: {
   if (!res.nextSnapshot) return null;
   return getSnapshotLabelAr(res.nextSnapshot, params.isSuperAdmin);
 }
+
+export const VALID_APP_ROUTES: ReadonlySet<string> = new Set<AppRoutePage>([
+  'dashboard',
+  'live_monitoring',
+  'monthly_grid',
+  'analytics',
+  'my_portal',
+  'requests',
+  'security_center',
+  'users',
+  'teams',
+  'audit_logs',
+  'security_settings',
+  'profile',
+]);
+
+/**
+ * استخراج المسار النشط للتطبيق من الرابط سواء عبر الـ Hash (#monthly_grid)
+ * أو عبر الرابط المباشر (/monthly_grid أو /subfolder/monthly_grid) عند إعادة التوجيه بـ .htaccess على InfinityFree
+ */
+export function resolveRouteFromBrowserLocation(
+  locationLike: {
+    hash?: string;
+    pathname?: string;
+    search?: string;
+  },
+  defaultRoute: AppRoutePage
+): {
+  route: AppRoutePage;
+  source: 'hash' | 'query' | 'pathname' | 'default';
+  cleanBasePath: string;
+} {
+  const rawPathname = locationLike.pathname || '/';
+  const segments = rawPathname
+    .split('/')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const lastSegment = segments[segments.length - 1] || '';
+  const isRouteInPath = VALID_APP_ROUTES.has(lastSegment);
+
+  // المسار الأساسي للمجلد (يدعم الجذر / أو مجلد فرعي مثل /shifts/ على الاستضافة)
+  const baseSegments = isRouteInPath
+    ? segments.slice(0, -1)
+    : segments.filter(
+        (seg) =>
+          seg.toLowerCase() !== 'index.html' &&
+          seg.toLowerCase() !== 'index.php' &&
+          seg.toLowerCase() !== '404.html'
+      );
+  const cleanBasePath =
+    baseSegments.length > 0 ? `/${baseSegments.join('/')}/` : '/';
+
+  const hashClean = (locationLike.hash || '')
+    .replace(/^#\/?/, '')
+    .split('?')[0]
+    .trim();
+  if (VALID_APP_ROUTES.has(hashClean)) {
+    return {
+      route: hashClean as AppRoutePage,
+      source: 'hash',
+      cleanBasePath,
+    };
+  }
+
+  if (locationLike.search) {
+    try {
+      const params = new URLSearchParams(locationLike.search);
+      const qRoute = (params.get('route') || params.get('page') || '').trim();
+      if (VALID_APP_ROUTES.has(qRoute)) {
+        return {
+          route: qRoute as AppRoutePage,
+          source: 'query',
+          cleanBasePath,
+        };
+      }
+    } catch {
+      // تجاهل أخطاء تحليل المعاملات غير القياسية
+    }
+  }
+
+  if (isRouteInPath) {
+    return {
+      route: lastSegment as AppRoutePage,
+      source: 'pathname',
+      cleanBasePath,
+    };
+  }
+
+  return {
+    route: defaultRoute,
+    source: 'default',
+    cleanBasePath,
+  };
+}
+

@@ -51,7 +51,17 @@ import {
   migrateLocalDataToFirestore,
   saveSecurityPolicySettings,
   updateUserAccountByAdmin,
+  upsertRepLiveTelemetry,
 } from '../services/firestoreService';
+import { getCachedGoogleAccessToken, isBenignAbortError } from '../firebase';
+import { useAuth } from '../context/AuthContext';
+import {
+  executeGoogleSheetsDirectSync,
+  isGoogleSheetsInput,
+  loadGoogleSheetsSyncPreferences,
+  runExternalCompanyEndpointSync,
+  saveGoogleSheetsSyncPreferences,
+} from '../services/googleSheetsService';
 import { UserManagementPage } from './UserManagementPage';
 import { TeamsManagementPage } from './TeamsManagementPage';
 import { AuditLogsPage } from './AuditLogsPage';
@@ -116,6 +126,7 @@ export const SuperAdminSecurityHub: React.FC<SuperAdminSecurityHubProps> = ({
   onSendPasswordReset,
   onNotify,
 }) => {
+  const { connectGoogleSheetsAccess } = useAuth();
   const [activeTab, setActiveTab] = useState<SecurityHubTab>(
     activeTabProp ?? initialTab
   );
@@ -591,58 +602,147 @@ export const SuperAdminSecurityHub: React.FC<SuperAdminSecurityHubProps> = ({
     }
   };
 
-  // مزامنة خارجية عبر الخادم الخلفي الآمن
+  // مزامنة مباشرة مع Google Sheets أو عبر الخادم الخلفي الآمن
   const handleRunExternalSync = async () => {
     const trimmed = externalSyncEndpoint.trim();
     if (!trimmed) {
-      onNotify('يرجى إدخال رابط HTTPS لنقطة بيانات الشركة أولاً أو استخدام استيراد JSON.', 'warning');
+      onNotify(
+        'يرجى إدخال رابط Google Sheets أو رابط HTTPS لنقطة بيانات الشركة أولاً.',
+        'warning'
+      );
       return;
     }
 
     setIsSyncingExternal(true);
     try {
-      const response = await fetch('/api/external-sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          endpointUrl: trimmed,
-          actorRole: currentUser.role,
-          actorStatus: currentUser.status,
-        }),
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `HTTP ${response.status}`);
-      }
-      if (Array.isArray(payload.employees)) {
+      // 1. إذا كان الرابط جدول Google Sheets، تعمل المزامنة مباشرة من المتصفح (متوافقة 100% مع InfinityFree)
+      if (isGoogleSheetsInput(trimmed)) {
+        const prefs = loadGoogleSheetsSyncPreferences();
+        let token = getCachedGoogleAccessToken() || '';
+        if (!token) {
+          token = await connectGoogleSheetsAccess(false);
+        }
+
+        let sheetRes: Awaited<ReturnType<typeof executeGoogleSheetsDirectSync>>;
+        try {
+          sheetRes = await executeGoogleSheetsDirectSync({
+            spreadsheetInput: trimmed,
+            preferredSheetTitle: prefs.sheetTitle,
+            accessToken: token,
+            targetYear: prefs.targetYear,
+            targetMonth: prefs.targetMonth,
+            existingEmployees: employees,
+            defaultTeamId: currentUser.teamId || '',
+          });
+        } catch (firstErr) {
+          const msg = firstErr instanceof Error ? firstErr.message : '';
+          if (msg.includes('انتهت صلاحية') || msg.includes('صلاحية قراءة')) {
+            token = await connectGoogleSheetsAccess(true);
+            sheetRes = await executeGoogleSheetsDirectSync({
+              spreadsheetInput: trimmed,
+              preferredSheetTitle: prefs.sheetTitle,
+              accessToken: token,
+              targetYear: prefs.targetYear,
+              targetMonth: prefs.targetMonth,
+              existingEmployees: employees,
+              defaultTeamId: currentUser.teamId || '',
+            });
+          } else {
+            throw firstErr;
+          }
+        }
+
         const res = await migrateLocalDataToFirestore({
           actor: currentUser,
-          employees: payload.employees,
-          attendanceRecords: payload.attendanceRecords || {},
-          sourceLabel: 'مزامنة خارجية مباشرة من مركز التحكم الأمني',
+          employees: sheetRes.parsed.employees,
+          attendanceRecords: sheetRes.parsed.attendanceRecords,
+          sourceLabel: `مزامنة Google Sheets من مركز التحكم الأمني (${sheetRes.metadata.title} — ${sheetRes.resolvedSheetTitle})`,
           markAsExternalSync: true,
         });
+
+        if (sheetRes.parsed.telemetryUpdates.length > 0) {
+          const empMap = new Map(sheetRes.parsed.employees.map((e) => [e.id, e]));
+          for (const tel of sheetRes.parsed.telemetryUpdates) {
+            const emp = empMap.get(tel.employeeId);
+            if (!emp) continue;
+            await upsertRepLiveTelemetry({
+              actor: currentUser,
+              employee: emp,
+              batch: tel.batch,
+              walletBalance: tel.walletBalance,
+              isOnline: false,
+              recordAudit: false,
+            });
+          }
+        }
+
+        const syncedAt = new Date().toLocaleString('ar-EG');
+        saveGoogleSheetsSyncPreferences({
+          spreadsheetInput: trimmed,
+          spreadsheetId: sheetRes.metadata.spreadsheetId,
+          spreadsheetTitle: sheetRes.metadata.title,
+          sheetTitle: sheetRes.resolvedSheetTitle,
+          lastSyncedAt: syncedAt,
+        });
+
         await saveSecurityPolicySettings({
           actor: currentUser,
           settings: {
             ...securityPolicy,
-            externalSyncEndpoint: trimmed,
-            lastExternalSyncStatus: 'نجاح المزامنة الآمنة',
+            externalSyncEndpoint: trimmed.slice(0, 300),
+            lastExternalSyncStatus: `متصل بـ Google Sheets (${sheetRes.resolvedSheetTitle})`.slice(
+              0,
+              100
+            ),
             lastExternalSyncImported: res.importedEmployees,
-            lastExternalSyncFailed: payload.stats?.failedCount || 0,
-            lastExternalSyncTime: new Date().toLocaleString('ar-EG'),
+            lastExternalSyncFailed: sheetRes.parsed.stats.skippedRows,
+            lastExternalSyncTime: syncedAt,
           },
-          auditActionLabel: 'تشغيل مزامنة البيانات الخارجية من مركز التحكم الأمني',
+          auditActionLabel: 'تشغيل مزامنة Google Sheets من مركز التحكم الأمني',
         });
+
         onNotify(
-          `تمت مزامنة ${res.importedEmployees} مندوب و ${res.importedAttendance} سجل شفت بنجاح.`
+          `تمت مزامنة ${res.importedEmployees} مندوب و${res.importedAttendance} سجل شفت من Google Sheets بنجاح.`
+        );
+        return;
+      }
+
+      // 2. رابط JSON خارجي عبر الخادم الخلفي الآمن
+      const payload = await runExternalCompanyEndpointSync({
+        endpointUrl: trimmed,
+        actorRole: currentUser.role,
+        actorStatus: currentUser.status,
+      });
+
+      const res = await migrateLocalDataToFirestore({
+        actor: currentUser,
+        employees: payload.employees,
+        attendanceRecords: payload.attendanceRecords || {},
+        sourceLabel: 'مزامنة خارجية مباشرة من مركز التحكم الأمني',
+        markAsExternalSync: true,
+      });
+      await saveSecurityPolicySettings({
+        actor: currentUser,
+        settings: {
+          ...securityPolicy,
+          externalSyncEndpoint: trimmed,
+          lastExternalSyncStatus: 'نجاح المزامنة الآمنة',
+          lastExternalSyncImported: res.importedEmployees,
+          lastExternalSyncFailed: payload.stats?.failedCount || 0,
+          lastExternalSyncTime: new Date().toLocaleString('ar-EG'),
+        },
+        auditActionLabel: 'تشغيل مزامنة البيانات الخارجية من مركز التحكم الأمني',
+      });
+      onNotify(
+        `تمت مزامنة ${res.importedEmployees} مندوب و ${res.importedAttendance} سجل شفت بنجاح.`
+      );
+    } catch (err) {
+      if (!isBenignAbortError(err)) {
+        onNotify(
+          err instanceof Error ? err.message : 'تعذر الاتصال بنقطة المزامنة الخارجية.',
+          'error'
         );
       }
-    } catch (err) {
-      onNotify(
-        err instanceof Error ? err.message : 'تعذر الاتصال بنقطة المزامنة الخارجية.',
-        'error'
-      );
     } finally {
       setIsSyncingExternal(false);
     }
@@ -1501,22 +1601,22 @@ export const SuperAdminSecurityHub: React.FC<SuperAdminSecurityHubProps> = ({
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-4">
             <h2 className="text-base font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
               <Globe className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-              الربط الآمن مع نظام / موقع الشركة الخارجي
+              الربط المباشر مع Google Sheets أو نظام الشركة الخارجي
             </h2>
             <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
-              تتم المزامنة عبر الخادم الخلفي الآمن (<code className="font-mono">/api/external-sync</code>) دون تخزين أي مفاتيح API أو رموز سرية في المتصفح أو Firestore.
+              أدخل رابط جدول <strong>Google Sheets</strong> للمزامنة السحابية المباشرة عبر OAuth من المتصفح (تعمل بالكامل على استضافة الويب الثابتة مثل InfinityFree دون خادم خلفي)، أو رابط نقطة API خارجية في حال تشغيل خادم خلفي (<code className="font-mono">/api/external-sync</code>).
             </p>
 
             <div>
               <label className="font-bold block mb-1">
-                رابط نقطة بيانات الشفتات الخارجية (HTTPS Endpoint)
+                رابط جدول Google Sheets أو نقطة بيانات الشفتات الخارجية
               </label>
               <input
-                type="url"
+                type="text"
                 dir="ltr"
                 value={externalSyncEndpoint}
                 onChange={(e) => setExternalSyncEndpoint(e.target.value)}
-                placeholder="https://api.company.com/v1/shifts"
+                placeholder="https://docs.google.com/spreadsheets/d/..."
                 className="w-full border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 bg-white dark:bg-slate-800 font-mono text-left"
               />
             </div>
@@ -1584,6 +1684,15 @@ export const SuperAdminSecurityHub: React.FC<SuperAdminSecurityHubProps> = ({
                   <Download className="w-4 h-4" />
                   تصدير نسخة احتياطية شاملة (JSON)
                 </button>
+                <a
+                  href="/api/download-dist-zip"
+                  download="dist_static_web_infinityfree.zip"
+                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold flex items-center gap-1.5 transition-colors"
+                  title="تنزيل حزمة البناء الجاهزة للاستضافة المباشرة على الإنترنت (dist.zip)"
+                >
+                  <Download className="w-4 h-4" />
+                  تنزيل حزمة الويب الثابتة (dist.zip)
+                </a>
                 <button
                   type="button"
                   onClick={() => backupFileInputRef.current?.click()}

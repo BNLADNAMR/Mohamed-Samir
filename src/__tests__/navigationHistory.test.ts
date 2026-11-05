@@ -149,4 +149,38 @@ describe('Universal Back Button Navigation History Stack', () => {
     expect(res.nextSnapshot?.route).toBe('my_portal');
     expect(getSnapshotLabelAr(res.nextSnapshot!, false)).toBe('بوابتي الشخصية');
   });
+
+  it('resolves SPA routes from hash, direct pathname (/monthly_grid), and subfolder pathname (/shifts/requests) for InfinityFree .htaccess hosting', async () => {
+    const { resolveRouteFromBrowserLocation } = await import(
+      '../utils/navigationHistory'
+    );
+
+    // 1. فتح مسار مباشر في جذر htdocs مثل https://site.infinityfreeapp.com/monthly_grid
+    const directRoot = resolveRouteFromBrowserLocation(
+      { pathname: '/monthly_grid', hash: '', search: '' },
+      'dashboard'
+    );
+    expect(directRoot.route).toBe('monthly_grid');
+    expect(directRoot.source).toBe('pathname');
+    expect(directRoot.cleanBasePath).toBe('/');
+
+    // 2. فتح مسار مباشر داخل مجلد فرعي مثل https://site.infinityfreeapp.com/shifts/live_monitoring
+    const directSubfolder = resolveRouteFromBrowserLocation(
+      { pathname: '/shifts/live_monitoring', hash: '', search: '' },
+      'dashboard'
+    );
+    expect(directSubfolder.route).toBe('live_monitoring');
+    expect(directSubfolder.source).toBe('pathname');
+    expect(directSubfolder.cleanBasePath).toBe('/shifts/');
+
+    // 3. فتح عبر Hash قياسي مع وجود index.html في المسار
+    const hashWithIndex = resolveRouteFromBrowserLocation(
+      { pathname: '/app/index.html', hash: '#requests', search: '' },
+      'dashboard'
+    );
+    expect(hashWithIndex.route).toBe('requests');
+    expect(hashWithIndex.source).toBe('hash');
+    expect(hashWithIndex.cleanBasePath).toBe('/app/');
+  });
 });
+

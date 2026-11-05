@@ -2,15 +2,13 @@ import { initializeApp } from 'firebase/app';
 import {
   getAuth,
   GoogleAuthProvider,
-  reauthenticateWithPopup,
+  RecaptchaVerifier,
+  signInWithPhoneNumber,
   signInWithPopup,
+  ConfirmationResult,
 } from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { SCOPES } from './services/googleSheetsService';
-import { isBenignAbortError } from './utils/abortErrorGuard';
-
-export { isBenignAbortError, SCOPES };
 
 const app = initializeApp(firebaseConfig);
 
@@ -25,12 +23,8 @@ export const db = configuredDatabaseId
 export const auth = getAuth(app);
 
 export const googleProvider = new GoogleAuthProvider();
-SCOPES.forEach((scope) => {
-  googleProvider.addScope(scope);
-});
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
-// تخزين رمز الوصول (OAuth Access Token) في الذاكرة فقط (In-Memory Only) وفق معايير الأمان دون استخدام localStorage أو sessionStorage
 let cachedGoogleAccessToken: string | null = null;
 let cachedTokenExpiresAtMs = 0;
 
@@ -62,46 +56,6 @@ export function clearCachedGoogleAccessToken(): void {
   cachedTokenExpiresAtMs = 0;
 }
 
-/**
- * طلب أو تجديد رمز الوصول لقراءة Google Sheets بإذن المستخدم المباشر عند الحاجة
- */
-export async function requestGoogleSheetsAccessToken(options?: {
-  forceConsent?: boolean;
-}): Promise<string> {
-  if (!options?.forceConsent) {
-    const existing = getCachedGoogleAccessToken();
-    if (existing) return existing;
-  }
-
-  const sheetsProvider = new GoogleAuthProvider();
-  SCOPES.forEach((scope) => {
-    sheetsProvider.addScope(scope);
-  });
-  sheetsProvider.setCustomParameters({
-    prompt: options?.forceConsent ? 'consent select_account' : 'select_account',
-  });
-
-  const currentUser = auth.currentUser;
-  const hasGoogleLinked = Boolean(
-    currentUser?.providerData?.some((p) => p.providerId === 'google.com')
-  );
-
-  const result =
-    currentUser && hasGoogleLinked
-      ? await reauthenticateWithPopup(currentUser, sheetsProvider)
-      : await signInWithPopup(auth, sheetsProvider);
-
-  const credential = GoogleAuthProvider.credentialFromResult(result);
-  if (!credential?.accessToken) {
-    throw new Error(
-      'تعذر استلام رمز إذن Google Sheets. يرجى الموافقة على صلاحية القراءة في نافذة Google والمحاولة مجدداً.'
-    );
-  }
-
-  setCachedGoogleAccessToken(credential.accessToken);
-  return credential.accessToken;
-}
-
 export enum OperationType {
   CREATE = 'create',
   UPDATE = 'update',
@@ -126,6 +80,12 @@ export interface FirestoreErrorInfo {
       email?: string | null;
     }[];
   };
+}
+
+export function isBenignAbortError(error: unknown): boolean {
+  if (!error) return false;
+  const msg = error instanceof Error ? error.message : String(error);
+  return /abort|canceled|cancelled|network.*changed/i.test(msg);
 }
 
 export function handleFirestoreError(
@@ -162,13 +122,8 @@ export async function validateFirestoreConnection(): Promise<void> {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
-    if (isBenignAbortError(error)) {
-      return;
-    }
-    if (
-      error instanceof Error &&
-      error.message.includes('the client is offline')
-    ) {
+    if (isBenignAbortError(error)) return;
+    if (error instanceof Error && error.message.includes('the client is offline')) {
       console.error('Please check your Firebase configuration.');
     }
   }

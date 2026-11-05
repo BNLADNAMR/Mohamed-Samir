@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
+  Clock,
   X,
   Upload,
   Download,
@@ -24,13 +25,19 @@ import { getCachedGoogleAccessToken, isBenignAbortError } from '../firebase';
 import { useAuth } from '../context/AuthContext';
 import { saveSecurityPolicySettings } from '../services/firestoreService';
 import {
+  executeGoogleSheetsDirectSync,
   extractSpreadsheetIdAndGid,
   fetchGoogleSheetTabValues,
   fetchGoogleSpreadsheetMetadata,
   GoogleSpreadsheetMetadata,
+  GoogleSheetsSyncIntervalMinutes,
+  GoogleSheetsSyncMode,
   isGoogleSheetsInput,
+  loadGoogleSheetsSyncPreferences,
   ParsedGoogleSheetShiftData,
   parseGoogleSheetRowsToShiftData,
+  runExternalCompanyEndpointSync,
+  saveGoogleSheetsSyncPreferences,
   SheetTelemetryImportItem,
 } from '../services/googleSheetsService';
 import { MONTH_NAMES } from '../utils/shiftCalculations';
@@ -70,24 +77,37 @@ export const ImportSyncModal: React.FC<ImportSyncModalProps> = ({
     securityPolicy
   );
 
+  const savedSyncPrefs = loadGoogleSheetsSyncPreferences();
   const initialSavedUrl = securityPolicy.externalSyncEndpoint || '';
   const initialIsGoogleSheet = isGoogleSheetsInput(initialSavedUrl);
 
   const [sheetInput, setSheetInput] = useState<string>(
-    initialIsGoogleSheet ? initialSavedUrl : ''
+    savedSyncPrefs.spreadsheetInput || (initialIsGoogleSheet ? initialSavedUrl : '')
   );
   const [endpointUrl, setEndpointUrl] = useState<string>(
     initialIsGoogleSheet ? '' : initialSavedUrl
   );
 
+  const [syncMode, setSyncMode] = useState<GoogleSheetsSyncMode>(
+    savedSyncPrefs.syncMode
+  );
+  const [syncIntervalMinutes, setSyncIntervalMinutes] =
+    useState<GoogleSheetsSyncIntervalMinutes>(savedSyncPrefs.intervalMinutes);
+
   const now = new Date();
-  const [targetYear, setTargetYear] = useState<number>(now.getFullYear());
-  const [targetMonth, setTargetMonth] = useState<number>(now.getMonth() + 1);
+  const [targetYear, setTargetYear] = useState<number>(
+    savedSyncPrefs.targetYear || now.getFullYear()
+  );
+  const [targetMonth, setTargetMonth] = useState<number>(
+    savedSyncPrefs.targetMonth || now.getMonth() + 1
+  );
 
   const [sheetMeta, setSheetMeta] = useState<GoogleSpreadsheetMetadata | null>(
     null
   );
-  const [selectedTabTitle, setSelectedTabTitle] = useState<string>('');
+  const [selectedTabTitle, setSelectedTabTitle] = useState<string>(
+    savedSyncPrefs.sheetTitle || ''
+  );
   const [sheetPreview, setSheetPreview] =
     useState<ParsedGoogleSheetShiftData | null>(null);
   const [confirmingSheetImport, setConfirmingSheetImport] = useState(false);
@@ -96,6 +116,7 @@ export const ImportSyncModal: React.FC<ImportSyncModalProps> = ({
   const [isLoadingMeta, setIsLoadingMeta] = useState(false);
   const [isReadingSheet, setIsReadingSheet] = useState(false);
   const [isImportingSheet, setIsImportingSheet] = useState(false);
+  const [isQuickSyncingSheets, setIsQuickSyncingSheets] = useState(false);
 
   const [statusBanner, setStatusBanner] = useState<{
     type: 'success' | 'error' | 'info';
@@ -192,13 +213,24 @@ export const ImportSyncModal: React.FC<ImportSyncModalProps> = ({
       const matchedTab =
         extracted.gid !== null
           ? metadata.sheets.find((s) => s.sheetId === extracted.gid)
+          : selectedTabTitle
+          ? metadata.sheets.find((s) => s.title === selectedTabTitle)
           : undefined;
       const chosenTitle = matchedTab?.title || metadata.sheets[0]?.title || '';
       setSelectedTabTitle(chosenTitle);
 
+      saveGoogleSheetsSyncPreferences({
+        spreadsheetInput: raw,
+        spreadsheetId: metadata.spreadsheetId,
+        spreadsheetTitle: metadata.title,
+        sheetTitle: chosenTitle,
+        targetYear,
+        targetMonth,
+      });
+
       setStatusBanner({
         type: 'success',
-        text: `تم الاتصال بالجدول "${metadata.title}" والعثور على ${metadata.sheets.length} ورقة عمل. اختر الورقة واضغط "قراءة ومعاينة البيانات".`,
+        text: `تم الاتصال بالجدول "${metadata.title}" والعثور على ${metadata.sheets.length} ورقة عمل. اختر الورقة واضغط "قراءة ومعاينة البيانات" أو "مزامنة فورية".`,
       });
     } catch (err) {
       if (!isBenignAbortError(err)) {
@@ -212,6 +244,147 @@ export const ImportSyncModal: React.FC<ImportSyncModalProps> = ({
       }
     } finally {
       setIsLoadingMeta(false);
+    }
+  };
+
+  const handleChangeSyncMode = (nextMode: GoogleSheetsSyncMode) => {
+    setSyncMode(nextMode);
+    saveGoogleSheetsSyncPreferences({
+      syncMode: nextMode,
+      intervalMinutes: syncIntervalMinutes,
+      spreadsheetInput: sheetInput.trim() || savedSyncPrefs.spreadsheetInput,
+      sheetTitle: selectedTabTitle || savedSyncPrefs.sheetTitle,
+      targetYear,
+      targetMonth,
+    });
+    setStatusBanner({
+      type: 'info',
+      text:
+        nextMode === 'auto'
+          ? `تم تفعيل وضع المزامنة التلقائية الدورية كل ${syncIntervalMinutes} دقيقة أثناء الجلسة النشطة.`
+          : 'تم ضبط وضع المزامنة اليدوية عند الطلب.',
+    });
+  };
+
+  const handleChangeSyncInterval = (
+    nextInterval: GoogleSheetsSyncIntervalMinutes
+  ) => {
+    setSyncIntervalMinutes(nextInterval);
+    saveGoogleSheetsSyncPreferences({
+      syncMode,
+      intervalMinutes: nextInterval,
+      spreadsheetInput: sheetInput.trim() || savedSyncPrefs.spreadsheetInput,
+      sheetTitle: selectedTabTitle || savedSyncPrefs.sheetTitle,
+      targetYear,
+      targetMonth,
+    });
+    if (syncMode === 'auto') {
+      setStatusBanner({
+        type: 'info',
+        text: `تم تحديث الفترة الزمنية للمزامنة التلقائية إلى كل ${nextInterval} دقيقة.`,
+      });
+    }
+  };
+
+  const handleQuickDirectSyncGoogleSheets = async () => {
+    const raw = sheetInput.trim();
+    if (!isGoogleSheetsInput(raw)) {
+      setStatusBanner({
+        type: 'error',
+        text: 'يرجى إدخال رابط أو معرّف Google Sheets صالح أولاً.',
+      });
+      return;
+    }
+
+    setIsQuickSyncingSheets(true);
+    setStatusBanner(null);
+    try {
+      let token = await obtainValidSheetsToken(false);
+      let result: Awaited<ReturnType<typeof executeGoogleSheetsDirectSync>>;
+      try {
+        result = await executeGoogleSheetsDirectSync({
+          spreadsheetInput: raw,
+          preferredSheetTitle: selectedTabTitle || savedSyncPrefs.sheetTitle,
+          accessToken: token,
+          targetYear,
+          targetMonth,
+          existingEmployees: employees,
+          defaultTeamId: currentUser.teamId || '',
+        });
+      } catch (firstErr) {
+        const msg = firstErr instanceof Error ? firstErr.message : '';
+        if (msg.includes('انتهت صلاحية') || msg.includes('صلاحية قراءة')) {
+          token = await obtainValidSheetsToken(true);
+          result = await executeGoogleSheetsDirectSync({
+            spreadsheetInput: raw,
+            preferredSheetTitle: selectedTabTitle || savedSyncPrefs.sheetTitle,
+            accessToken: token,
+            targetYear,
+            targetMonth,
+            existingEmployees: employees,
+            defaultTeamId: currentUser.teamId || '',
+          });
+        } else {
+          throw firstErr;
+        }
+      }
+
+      const sourceLabel = `مزامنة Google Sheets المباشرة (${result.metadata.title} — ${result.resolvedSheetTitle})`;
+      await onImportData(
+        result.parsed.employees,
+        result.parsed.attendanceRecords,
+        true,
+        result.parsed.telemetryUpdates,
+        sourceLabel
+      );
+
+      const syncedTimeLabel = new Date().toLocaleString('ar-EG');
+      saveGoogleSheetsSyncPreferences({
+        syncMode,
+        intervalMinutes: syncIntervalMinutes,
+        spreadsheetInput: raw,
+        spreadsheetId: result.metadata.spreadsheetId,
+        spreadsheetTitle: result.metadata.title,
+        sheetTitle: result.resolvedSheetTitle,
+        targetYear,
+        targetMonth,
+        lastSyncedAt: syncedTimeLabel,
+      });
+
+      if (currentUser.role === 'super_admin') {
+        await saveSecurityPolicySettings({
+          actor: currentUser,
+          settings: {
+            ...securityPolicy,
+            externalSyncEndpoint: raw.slice(0, 300),
+            lastExternalSyncStatus: `متصل بـ Google Sheets (${result.resolvedSheetTitle})`.slice(
+              0,
+              100
+            ),
+            lastExternalSyncImported: result.parsed.stats.importedEmployees,
+            lastExternalSyncFailed: result.parsed.stats.skippedRows,
+            lastExternalSyncTime: syncedTimeLabel,
+          },
+          auditActionLabel: 'مزامنة فورية مباشرة من Google Sheets إلى السحابة',
+        });
+      }
+
+      onSyncComplete(
+        `تمت مزامنة ${result.parsed.stats.importedEmployees} مندوب و${result.parsed.stats.importedAttendance} سجل شفت من ورقة "${result.resolvedSheetTitle}" بنجاح.`
+      );
+      onClose();
+    } catch (err) {
+      if (!isBenignAbortError(err)) {
+        setStatusBanner({
+          type: 'error',
+          text:
+            err instanceof Error
+              ? err.message
+              : 'فشلت المزامنة مع Google Sheets. تأكد من الاتصال بالإنترنت ومشاركة الجدول مع حسابك.',
+        });
+      }
+    } finally {
+      setIsQuickSyncingSheets(false);
     }
   };
 
@@ -278,6 +451,19 @@ export const ImportSyncModal: React.FC<ImportSyncModalProps> = ({
         sourceLabel
       );
 
+      const syncedTimeLabel = new Date().toLocaleString('ar-EG');
+      saveGoogleSheetsSyncPreferences({
+        syncMode,
+        intervalMinutes: syncIntervalMinutes,
+        spreadsheetInput: sheetInput.trim(),
+        spreadsheetId: sheetMeta.spreadsheetId,
+        spreadsheetTitle: sheetMeta.title,
+        sheetTitle: selectedTabTitle,
+        targetYear,
+        targetMonth,
+        lastSyncedAt: syncedTimeLabel,
+      });
+
       if (currentUser.role === 'super_admin') {
         await saveSecurityPolicySettings({
           actor: currentUser,
@@ -290,7 +476,7 @@ export const ImportSyncModal: React.FC<ImportSyncModalProps> = ({
             ),
             lastExternalSyncImported: sheetPreview.stats.importedEmployees,
             lastExternalSyncFailed: sheetPreview.stats.skippedRows,
-            lastExternalSyncTime: new Date().toLocaleString('ar-EG'),
+            lastExternalSyncTime: syncedTimeLabel,
           },
           auditActionLabel: 'حفظ ومزامنة بيانات Google Sheets في السحابة',
         });
@@ -362,54 +548,38 @@ export const ImportSyncModal: React.FC<ImportSyncModalProps> = ({
     setIsTesting(true);
     setStatusBanner(null);
     try {
-      const apiBaseUrl = String(import.meta.env.VITE_API_BASE_URL || '')
-        .trim()
-        .replace(/\/+$/, '');
-      const syncApiEndpoint = `${apiBaseUrl}/api/external-sync`;
-
-      const response = await fetch(syncApiEndpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const payload = await runExternalCompanyEndpointSync({
+        endpointUrl: trimmed,
+        actorRole: currentUser.role,
+        actorStatus: currentUser.status,
         signal: controller.signal,
-        body: JSON.stringify({
-          endpointUrl: trimmed,
-          actorRole: currentUser.role,
-          actorStatus: currentUser.status,
-        }),
       });
 
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || `HTTP ${response.status}`);
+      await onImportData(
+        payload.employees,
+        payload.attendanceRecords || {},
+        true
+      );
+
+      if (currentUser.role === 'super_admin') {
+        await saveSecurityPolicySettings({
+          actor: currentUser,
+          settings: {
+            ...securityPolicy,
+            externalSyncEndpoint: trimmed,
+            lastExternalSyncStatus: 'نجاح المزامنة الآمنة',
+            lastExternalSyncImported:
+              payload.stats?.importedEmployees || payload.employees.length,
+            lastExternalSyncFailed: payload.stats?.failedCount || 0,
+            lastExternalSyncTime: new Date().toLocaleString('ar-EG'),
+          },
+        });
       }
 
-      if (Array.isArray(payload.employees)) {
-        await onImportData(
-          payload.employees,
-          payload.attendanceRecords || {},
-          true
-        );
-
-        if (currentUser.role === 'super_admin') {
-          await saveSecurityPolicySettings({
-            actor: currentUser,
-            settings: {
-              ...securityPolicy,
-              externalSyncEndpoint: trimmed,
-              lastExternalSyncStatus: 'نجاح المزامنة الآمنة',
-              lastExternalSyncImported:
-                payload.stats?.importedEmployees || payload.employees.length,
-              lastExternalSyncFailed: payload.stats?.failedCount || 0,
-              lastExternalSyncTime: new Date().toLocaleString('ar-EG'),
-            },
-          });
-        }
-
-        onSyncComplete(
-          `تمت مزامنة ${payload.employees.length} مندوب بنجاح من النظام الخارجي وتوسيمها كمصدر خارجي موثوق.`
-        );
-        onClose();
-      }
+      onSyncComplete(
+        `تمت مزامنة ${payload.employees.length} مندوب بنجاح من النظام الخارجي وتوسيمها كمصدر خارجي موثوق.`
+      );
+      onClose();
     } catch (err) {
       if (isBenignAbortError(err)) {
         return;
@@ -597,15 +767,93 @@ export const ImportSyncModal: React.FC<ImportSyncModalProps> = ({
                 />
                 <button
                   type="button"
-                  disabled={isLoadingMeta || !sheetInput.trim()}
+                  disabled={isLoadingMeta || isQuickSyncingSheets || !sheetInput.trim()}
                   onClick={() => handleInspectSpreadsheet()}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
+                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
                 >
                   <RefreshCw
                     className={`w-3.5 h-3.5 ${isLoadingMeta ? 'animate-spin' : ''}`}
                   />
                   {isLoadingMeta ? 'جارٍ فحص الجدول...' : 'جلب أوراق الملف (Tabs)'}
                 </button>
+                {isGoogleSheetsInput(sheetInput) && (
+                  <button
+                    type="button"
+                    disabled={isQuickSyncingSheets || isLoadingMeta}
+                    onClick={handleQuickDirectSyncGoogleSheets}
+                    className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors cursor-pointer"
+                    title="قراءة ومزامنة الجدول مباشرة إلى Cloud Firestore"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${
+                        isQuickSyncingSheets ? 'animate-spin' : ''
+                      }`}
+                    />
+                    {isQuickSyncingSheets ? 'جارٍ المزامنة...' : 'مزامنة فورية'}
+                  </button>
+                )}
+              </div>
+
+              {/* اختيار وضع المزامنة: يدوية أو تلقائية دورية */}
+              <div className="p-3 rounded-lg bg-white/90 dark:bg-slate-900/90 border border-emerald-200/80 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <div>
+                    <span className="font-bold text-slate-800 dark:text-slate-100 block">
+                      آلية مزامنة Google Sheets (يدوية / تلقائية)
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {syncMode === 'auto'
+                        ? `المزامنة التلقائية مفعلة كل ${syncIntervalMinutes} دقيقة أثناء الجلسة النشطة دون أي بيانات وهمية`
+                        : 'المزامنة اليدوية مفعلة (يتم التحديث عند الضغط على زر المزامنة فقط)'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => handleChangeSyncMode('manual')}
+                      className={`px-3 py-1 rounded-md font-bold text-[11px] transition-colors cursor-pointer ${
+                        syncMode === 'manual'
+                          ? 'bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-300 shadow-2xs'
+                          : 'text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      مزامنة يدوية
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleChangeSyncMode('auto')}
+                      className={`px-3 py-1 rounded-md font-bold text-[11px] transition-colors cursor-pointer ${
+                        syncMode === 'auto'
+                          ? 'bg-emerald-600 text-white shadow-2xs'
+                          : 'text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      مزامنة تلقائية
+                    </button>
+                  </div>
+
+                  {syncMode === 'auto' && (
+                    <select
+                      value={syncIntervalMinutes}
+                      onChange={(e) =>
+                        handleChangeSyncInterval(
+                          Number(e.target.value) as GoogleSheetsSyncIntervalMinutes
+                        )
+                      }
+                      aria-label="فترة المزامنة التلقائية"
+                      className="border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 font-bold text-[11px]"
+                    >
+                      <option value={5}>كل 5 دقائق</option>
+                      <option value={10}>كل 10 دقائق</option>
+                      <option value={15}>كل 15 دقيقة</option>
+                      <option value={30}>كل 30 دقيقة</option>
+                    </select>
+                  )}
+                </div>
               </div>
 
               {sheetMeta && (
@@ -834,8 +1082,17 @@ export const ImportSyncModal: React.FC<ImportSyncModalProps> = ({
                 className="px-4 py-2 bg-slate-900 dark:bg-indigo-600 hover:bg-slate-800 dark:hover:bg-indigo-500 text-white rounded-lg font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap"
               >
                 <Download className="w-3.5 h-3.5" />
-                تصدير نسخة احتياطية
+                تصدير نسخة احتياطية (JSON)
               </button>
+              <a
+                href="/api/download-dist-zip"
+                download="dist_static_web_infinityfree.zip"
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap"
+                title="تنزيل ملف ZIP مضغوط يضم محتويات مجلد dist بالكامل للرفع المباشر على استضافة الويب (InfinityFree)"
+              >
+                <Download className="w-3.5 h-3.5" />
+                تنزيل حزمة الإنتاج (dist.zip)
+              </a>
               {canManageIntegration && (
                 <>
                   <button

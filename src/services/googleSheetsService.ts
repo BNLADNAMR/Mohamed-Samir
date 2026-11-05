@@ -905,3 +905,286 @@ export function parseGoogleSheetRowsToShiftData(
     warnings: warnings.slice(0, 10),
   };
 }
+
+export type GoogleSheetsSyncMode = 'manual' | 'auto';
+export type GoogleSheetsSyncIntervalMinutes = 5 | 10 | 15 | 30;
+
+export interface GoogleSheetsSyncPreferences {
+  syncMode: GoogleSheetsSyncMode;
+  intervalMinutes: GoogleSheetsSyncIntervalMinutes;
+  spreadsheetInput: string;
+  spreadsheetId: string;
+  spreadsheetTitle: string;
+  sheetTitle: string;
+  targetYear: number;
+  targetMonth: number;
+  lastSyncedAt: string;
+}
+
+export const GOOGLE_SHEETS_SYNC_PREFS_STORAGE_KEY =
+  'shift_tracker_gsheets_sync_prefs_v1';
+export const GOOGLE_SHEETS_PREFS_UPDATED_EVENT =
+  'shift-tracker-gsheets-prefs-updated';
+
+const VALID_SYNC_INTERVALS: ReadonlySet<number> = new Set([5, 10, 15, 30]);
+
+export function getDefaultGoogleSheetsSyncPreferences(): GoogleSheetsSyncPreferences {
+  const now = new Date();
+  return {
+    syncMode: 'manual',
+    intervalMinutes: 15,
+    spreadsheetInput: '',
+    spreadsheetId: '',
+    spreadsheetTitle: '',
+    sheetTitle: '',
+    targetYear: now.getFullYear(),
+    targetMonth: now.getMonth() + 1,
+    lastSyncedAt: '',
+  };
+}
+
+let memorySyncPrefsFallback: GoogleSheetsSyncPreferences | null = null;
+
+export function loadGoogleSheetsSyncPreferences(): GoogleSheetsSyncPreferences {
+  const defaults = getDefaultGoogleSheetsSyncPreferences();
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return memorySyncPrefsFallback ? { ...memorySyncPrefsFallback } : defaults;
+  }
+  try {
+    const raw = window.localStorage.getItem(GOOGLE_SHEETS_SYNC_PREFS_STORAGE_KEY);
+    if (!raw) {
+      return memorySyncPrefsFallback ? { ...memorySyncPrefsFallback } : defaults;
+    }
+    const parsed = JSON.parse(raw) as Partial<GoogleSheetsSyncPreferences>;
+    const syncMode: GoogleSheetsSyncMode =
+      parsed.syncMode === 'auto' ? 'auto' : 'manual';
+    const intervalNum = Number(parsed.intervalMinutes);
+    const intervalMinutes: GoogleSheetsSyncIntervalMinutes = VALID_SYNC_INTERVALS.has(
+      intervalNum
+    )
+      ? (intervalNum as GoogleSheetsSyncIntervalMinutes)
+      : 15;
+    const targetYear =
+      Number(parsed.targetYear) >= 2020 && Number(parsed.targetYear) <= 2099
+        ? Number(parsed.targetYear)
+        : defaults.targetYear;
+    const targetMonth =
+      Number(parsed.targetMonth) >= 1 && Number(parsed.targetMonth) <= 12
+        ? Number(parsed.targetMonth)
+        : defaults.targetMonth;
+
+    return {
+      syncMode,
+      intervalMinutes,
+      spreadsheetInput: String(parsed.spreadsheetInput || '').trim().slice(0, 300),
+      spreadsheetId: String(parsed.spreadsheetId || '').trim().slice(0, 120),
+      spreadsheetTitle: String(parsed.spreadsheetTitle || '').trim().slice(0, 160),
+      sheetTitle: String(parsed.sheetTitle || '').trim().slice(0, 120),
+      targetYear,
+      targetMonth,
+      lastSyncedAt: String(parsed.lastSyncedAt || '').trim().slice(0, 80),
+    };
+  } catch {
+    return memorySyncPrefsFallback ? { ...memorySyncPrefsFallback } : defaults;
+  }
+}
+
+export function saveGoogleSheetsSyncPreferences(
+  prefs: Partial<GoogleSheetsSyncPreferences>
+): GoogleSheetsSyncPreferences {
+  const current = loadGoogleSheetsSyncPreferences();
+  const merged: GoogleSheetsSyncPreferences = {
+    ...current,
+    ...prefs,
+    syncMode:
+      (prefs.syncMode ?? current.syncMode) === 'auto' ? 'auto' : 'manual',
+    intervalMinutes: VALID_SYNC_INTERVALS.has(
+      Number(prefs.intervalMinutes ?? current.intervalMinutes)
+    )
+      ? (Number(
+          prefs.intervalMinutes ?? current.intervalMinutes
+        ) as GoogleSheetsSyncIntervalMinutes)
+      : current.intervalMinutes,
+  };
+
+  memorySyncPrefsFallback = { ...merged };
+
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.setItem(
+        GOOGLE_SHEETS_SYNC_PREFS_STORAGE_KEY,
+        JSON.stringify(merged)
+      );
+      window.dispatchEvent(new CustomEvent(GOOGLE_SHEETS_PREFS_UPDATED_EVENT));
+    } catch {
+      // تجاهل قيود التخزين المحلي في وضع التصفح الخاص والاعتماد على الذاكرة
+    }
+  }
+  return merged;
+}
+
+/**
+ * تنفيذ قراءة ومزامنة فعلية متكاملة من Google Sheets API v4 دون أي بيانات تجريبية بديلة عند الفشل
+ */
+export async function executeGoogleSheetsDirectSync(params: {
+  spreadsheetInput: string;
+  preferredSheetTitle?: string;
+  accessToken: string;
+  targetYear?: number;
+  targetMonth?: number;
+  existingEmployees?: Employee[];
+  defaultTeamId?: string;
+  signal?: AbortSignal;
+}): Promise<{
+  metadata: GoogleSpreadsheetMetadata;
+  resolvedSheetTitle: string;
+  parsed: ParsedGoogleSheetShiftData;
+}> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    throw new Error(
+      'لا يوجد اتصال بالإنترنت حالياً. يرجى التحقق من الشبكة ثم إعادة محاولة المزامنة مع Google Sheets.'
+    );
+  }
+
+  const extracted = extractSpreadsheetIdAndGid(params.spreadsheetInput);
+  if (!extracted) {
+    throw new Error(
+      'رابط أو معرّف Google Sheets غير صالح. يرجى إدخال رابط جدول Google Sheets صحيح.'
+    );
+  }
+
+  if (!params.accessToken) {
+    throw new Error(
+      'يلزم تفعيل إذن قراءة Google Sheets أولاً عبر حساب Google الموثق.'
+    );
+  }
+
+  const metadata = await fetchGoogleSpreadsheetMetadata(
+    extracted.spreadsheetId,
+    params.accessToken,
+    params.signal
+  );
+
+  const preferredClean = (params.preferredSheetTitle || '').trim();
+  const byTitle = preferredClean
+    ? metadata.sheets.find((s) => s.title === preferredClean)
+    : undefined;
+  const byGid =
+    extracted.gid !== null
+      ? metadata.sheets.find((s) => s.sheetId === extracted.gid)
+      : undefined;
+  const resolvedSheet = byTitle || byGid || metadata.sheets[0];
+
+  if (!resolvedSheet) {
+    throw new Error('لم يتم العثور على أي ورقة عمل صالحة داخل ملف Google Sheets.');
+  }
+
+  const rows = await fetchGoogleSheetTabValues(
+    metadata.spreadsheetId,
+    resolvedSheet.title,
+    params.accessToken,
+    params.signal
+  );
+
+  const parsed = parseGoogleSheetRowsToShiftData(rows, {
+    targetYear: params.targetYear,
+    targetMonth: params.targetMonth,
+    existingEmployees: params.existingEmployees,
+    defaultTeamId: params.defaultTeamId,
+  });
+
+  return {
+    metadata,
+    resolvedSheetTitle: resolvedSheet.title,
+    parsed,
+  };
+}
+
+/**
+ * استدعاء آمن لنقطة المزامنة الخلفية (/api/external-sync) مع دعم الاستضافة الثابتة (InfinityFree / Apache)
+ * دون انهيار JSON عند غياب خادم Node.js الخلفي
+ */
+export async function runExternalCompanyEndpointSync(params: {
+  endpointUrl: string;
+  actorRole: string;
+  actorStatus: string;
+  signal?: AbortSignal;
+}): Promise<{
+  employees: Employee[];
+  attendanceRecords: Record<string, AttendanceRecord>;
+  stats?: { importedEmployees?: number; failedCount?: number };
+}> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    throw new Error('لا يوجد اتصال بالإنترنت حالياً لإجراء المزامنة الخارجية.');
+  }
+
+  const apiBaseUrl = String(import.meta.env.VITE_API_BASE_URL || '')
+    .trim()
+    .replace(/\/+$/, '');
+  const syncApiEndpoint = `${apiBaseUrl}/api/external-sync`;
+
+  let response: Response;
+  try {
+    response = await fetch(syncApiEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      signal: params.signal,
+      body: JSON.stringify({
+        endpointUrl: params.endpointUrl.trim(),
+        actorRole: params.actorRole,
+        actorStatus: params.actorStatus,
+      }),
+    });
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'AbortError') {
+      throw err;
+    }
+    throw new Error(
+      'تعذر الوصول إلى خادم المزامنة الخلفي (/api/external-sync). على استضافة الويب الثابتة (مثل InfinityFree) استخدم "الربط المباشر مع Google Sheets" أو "استيراد JSON"، أو اضبط متغير VITE_API_BASE_URL لخادم خلفي خارجي.'
+    );
+  }
+
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  const rawText = await response.text();
+
+  let payload: {
+    error?: string;
+    employees?: Employee[];
+    attendanceRecords?: Record<string, AttendanceRecord>;
+    stats?: { importedEmployees?: number; failedCount?: number };
+  } | null = null;
+
+  if (rawText && (contentType.includes('application/json') || rawText.trim().startsWith('{'))) {
+    try {
+      payload = JSON.parse(rawText);
+    } catch {
+      payload = null;
+    }
+  }
+
+  if (!payload) {
+    throw new Error(
+      'ميزة المزامنة عبر الخادم الوسيط (/api/external-sync) تتطلب خادم Node.js خلفي نشط لحقن التوكن السري، وهي غير مفعلة على الاستضافة الثابتة (Static Hosting / InfinityFree) بدون ضبط VITE_API_BASE_URL. يمكنك استخدام "الربط المباشر مع Google Sheets" أو "استيراد ملف JSON" فهما يعملان بالكامل مباشرة من المتصفح.'
+    );
+  }
+
+  if (!response.ok) {
+    throw new Error(payload.error || `فشل الاتصال بنقطة المزامنة الخارجية (HTTP ${response.status}).`);
+  }
+
+  if (!Array.isArray(payload.employees)) {
+    throw new Error(
+      'استجابة نقطة المزامنة الخارجية لا تحتوي على مصفوفة المندوبين (employees) بالصيغة المعتمدة.'
+    );
+  }
+
+  return {
+    employees: payload.employees,
+    attendanceRecords: payload.attendanceRecords || {},
+    stats: payload.stats,
+  };
+}
+
